@@ -205,9 +205,30 @@ def callback():
     return "OK"
 
 
+def summarize_text(text: str) -> str:
+    """Use OpenAI to summarize text content"""
+    if not openai_client:
+        return "文字摘要功能未設定，請設定 OPENAI_API_KEY"
+
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "你是一個文字摘要助手，用繁體中文回覆。請將用戶提供的文字整理成清晰的重點摘要。"},
+                {"role": "user", "content": f"請幫我整理以下文字的重點摘要：\n\n{text}"}
+            ],
+            max_tokens=1000,
+            temperature=0.7
+        )
+        return response.choices[0].message.content
+
+    except Exception as e:
+        return f"摘要生成失敗：{str(e)}"
+
+
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
-    """Handle text messages - check for URL or echo back"""
+    """Handle text messages - URL summary or text summary"""
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
 
@@ -224,7 +245,7 @@ def handle_text_message(event):
                 content = fetch_webpage_content(url)
                 print(f"[DEBUG] Content length: {len(content)}")
 
-                print(f"[DEBUG] Generating summary...")
+                print(f"[DEBUG] Generating webpage summary...")
                 summary = summarize_webpage(content)
                 print(f"[DEBUG] Summary: {summary[:100]}...")
 
@@ -244,14 +265,25 @@ def handle_text_message(event):
                     )
                 )
         else:
-            print(f"[DEBUG] No URL found, echoing text")
-            # Echo back the text
-            line_bot_api.reply_message_with_http_info(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=text)],
+            # Summarize the text
+            print(f"[DEBUG] Generating text summary...")
+            try:
+                summary = summarize_text(text)
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=f"📝 文字摘要\n\n{summary}")],
+                    )
                 )
-            )
+                print(f"[DEBUG] Text summary sent successfully")
+            except Exception as e:
+                print(f"[DEBUG] Error: {str(e)}")
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=f"❌ 文字摘要失敗：{str(e)}")],
+                    )
+                )
 
 
 @handler.add(MessageEvent, message=AudioMessageContent)
