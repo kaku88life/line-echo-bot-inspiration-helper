@@ -86,30 +86,21 @@ def fetch_webpage_content(url: str) -> str:
             if og_desc:
                 description = og_desc.get('content', '')
 
-        # Get article content (beginning + ending paragraphs)
-        all_paragraphs = []
+        # Remove unnecessary elements
+        for element in soup(['script', 'style', 'nav', 'header', 'footer', 'aside', 'iframe', 'noscript']):
+            element.decompose()
 
-        # Try to find article content
+        # Get article content
         article = soup.find('article') or soup.find('main') or soup.find('div', class_=lambda x: x and 'content' in x.lower() if x else False)
 
         if article:
-            for p in article.find_all('p'):
-                text = p.get_text(strip=True)
-                if len(text) > 30:  # Skip short paragraphs
-                    all_paragraphs.append(text)
+            content = article.get_text(separator='\n', strip=True)
         else:
-            for p in soup.find_all('p'):
-                text = p.get_text(strip=True)
-                if len(text) > 30:
-                    all_paragraphs.append(text)
+            content = soup.get_text(separator='\n', strip=True)
 
-        # Take first 3 + last 2 paragraphs to capture intro and conclusion
-        if len(all_paragraphs) > 5:
-            paragraphs = all_paragraphs[:3] + ["..."] + all_paragraphs[-2:]
-        else:
-            paragraphs = all_paragraphs
-
-        content = '\n'.join(paragraphs)
+        # Clean up - remove extra whitespace and short lines
+        lines = [line.strip() for line in content.split('\n') if len(line.strip()) > 20]
+        content = '\n'.join(lines)
 
         # Limit content length
         if len(content) > 2000:
