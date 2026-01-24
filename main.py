@@ -44,7 +44,7 @@ if OPENAI_API_KEY:
 gemini_model = None
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+    gemini_model = genai.GenerativeModel('gemini-2.0-flash')
 
 # URL pattern for detecting links
 URL_PATTERN = re.compile(
@@ -113,9 +113,9 @@ def fetch_webpage_content(url: str) -> str:
 
 
 def summarize_webpage(content: str) -> str:
-    """Use Gemini to summarize webpage content"""
-    if not gemini_model:
-        return "網頁摘要功能未設定，請設定 GEMINI_API_KEY"
+    """Use OpenAI to summarize webpage content"""
+    if not openai_client:
+        return "網頁摘要功能未設定，請設定 OPENAI_API_KEY"
 
     try:
         prompt = f"""用繁體中文總結以下網頁的3-5個重點：
@@ -129,8 +129,16 @@ def summarize_webpage(content: str) -> str:
 • 重點2
 • 重點3
 """
-        response = gemini_model.generate_content(prompt)
-        return response.text
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "你是一個網頁摘要助手，用繁體中文回覆。"},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=1000,
+            temperature=0.7
+        )
+        return response.choices[0].message.content
 
     except Exception as e:
         return f"摘要生成失敗：{str(e)}"
