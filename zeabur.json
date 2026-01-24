@@ -1,4 +1,4 @@
 {
   "build_command": "uv sync",
-  "start_command": "uv run gunicorn main:app --bind 0.0.0.0:$PORT"
+  "start_command": "uv run gunicorn main:app --bind 0.0.0.0:$PORT --timeout 120"
 }
