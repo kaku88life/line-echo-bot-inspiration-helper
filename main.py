@@ -35,6 +35,54 @@ openai_client = None
 if OPENAI_API_KEY:
     openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
+# Known Whisper hallucination patterns
+HALLUCINATION_PATTERNS = [
+    "请不吝点赞",
+    "點贊訂閱",
+    "订阅转发",
+    "訂閱轉發",
+    "打赏支持",
+    "打賞支持",
+    "明镜与点点",
+    "明鏡與點點",
+    "感谢观看",
+    "感謝觀看",
+    "谢谢收看",
+    "謝謝收看",
+    "欢迎订阅",
+    "歡迎訂閱",
+    "like and subscribe",
+    "thanks for watching",
+    "字幕由",
+    "字幕提供",
+    "subtitles by",
+    "amara.org",
+]
+
+
+def is_hallucination(text: str) -> bool:
+    """Check if the transcription is likely a hallucination"""
+    if not text or len(text.strip()) == 0:
+        return True
+
+    text_lower = text.lower().strip()
+
+    # Check against known hallucination patterns
+    for pattern in HALLUCINATION_PATTERNS:
+        if pattern.lower() in text_lower:
+            return True
+
+    # Check if text is too short and repetitive
+    if len(text_lower) < 5:
+        return True
+
+    # Check if text is just repeated characters/words
+    words = text_lower.split()
+    if len(words) > 2 and len(set(words)) == 1:
+        return True
+
+    return False
+
 
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -106,8 +154,19 @@ def handle_audio_message(event):
             # Clean up temp file
             os.unlink(tmp_file_path)
 
+            # Check for hallucination
+            result_text = transcription.text if transcription.text else ""
+
+            if is_hallucination(result_text):
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text="⚠️ 無法辨識語音內容\n\n可能原因：\n• 語音太短或太模糊\n• 背景噪音太大\n• 沒有錄到聲音\n\n請重新錄製語音訊息。")],
+                    )
+                )
+                return
+
             # Reply with transcription
-            result_text = transcription.text if transcription.text else "無法辨識語音內容"
             line_bot_api.reply_message_with_http_info(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
