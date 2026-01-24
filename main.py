@@ -85,7 +85,14 @@ def handle_audio_message(event):
 
             # Save to temporary file
             with tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as tmp_file:
-                tmp_file.write(audio_content)
+                # Handle both bytes and iterator response
+                if hasattr(audio_content, 'read'):
+                    tmp_file.write(audio_content.read())
+                elif hasattr(audio_content, '__iter__') and not isinstance(audio_content, bytes):
+                    for chunk in audio_content:
+                        tmp_file.write(chunk)
+                else:
+                    tmp_file.write(audio_content)
                 tmp_file_path = tmp_file.name
 
             # Transcribe using OpenAI Whisper
