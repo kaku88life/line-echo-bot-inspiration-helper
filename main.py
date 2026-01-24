@@ -118,24 +118,34 @@ def summarize_webpage(content: str) -> str:
         return "網頁摘要功能未設定，請設定 OPENAI_API_KEY"
 
     try:
-        prompt = f"""用繁體中文總結以下網頁的3-5個重點：
+        prompt = f"""請分析以下網頁內容，用繁體中文提供完整摘要：
 
 {content}
 
-格式：
-📌 主題：[一句話]
-📝 重點：
-• 重點1
-• 重點2
-• 重點3
+請用以下格式回覆：
+
+🏷️ 分類：[從以下選擇：科技/商業/新聞/教學/生活/娛樂/其他]
+
+📌 主題：[一句話描述核心主題]
+
+📝 重點摘要：
+• [重點1 - 詳細說明]
+• [重點2 - 詳細說明]
+• [重點3 - 詳細說明]
+（依內容提供3-5個重點）
+
+💡 關鍵資訊：
+[列出重要的數據、日期、人名、專有名詞等]
+
+🎯 一句話總結：[用一句話總結整篇文章的核心價值]
 """
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "你是一個網頁摘要助手，用繁體中文回覆。"},
+                {"role": "system", "content": "你是一個專業的網頁摘要助手，擅長提取重點並用繁體中文清晰呈現。"},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=1000,
+            max_tokens=1500,
             temperature=0.7
         )
         return response.choices[0].message.content
@@ -211,13 +221,33 @@ def summarize_text(text: str) -> str:
         return "文字摘要功能未設定，請設定 OPENAI_API_KEY"
 
     try:
+        prompt = f"""請分析以下文字內容，用繁體中文提供完整摘要：
+
+{text}
+
+請用以下格式回覆：
+
+🏷️ 分類：[從以下選擇：科技/商業/新聞/教學/生活/娛樂/筆記/想法/其他]
+
+📌 主題：[一句話描述核心主題]
+
+📝 重點摘要：
+• [重點1 - 詳細說明]
+• [重點2 - 詳細說明]
+• [重點3 - 詳細說明]
+（依內容提供3-5個重點）
+
+💡 關鍵字：[列出3-5個關鍵字，用逗號分隔]
+
+🎯 一句話總結：[用一句話總結整段文字的核心內容]
+"""
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "你是一個文字摘要助手，用繁體中文回覆。請將用戶提供的文字整理成清晰的重點摘要。"},
-                {"role": "user", "content": f"請幫我整理以下文字的重點摘要：\n\n{text}"}
+                {"role": "system", "content": "你是一個專業的文字摘要助手，擅長提取重點、分類內容，並用繁體中文清晰呈現。"},
+                {"role": "user", "content": prompt}
             ],
-            max_tokens=1000,
+            max_tokens=1500,
             temperature=0.7
         )
         return response.choices[0].message.content
