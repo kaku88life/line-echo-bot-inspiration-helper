@@ -59,41 +59,57 @@ def extract_url(text: str) -> str | None:
 
 
 def fetch_webpage_content(url: str) -> str:
-    """Fetch and extract main text content from a webpage"""
+    """Fetch and extract key content from a webpage"""
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
         response = requests.get(url, headers=headers, timeout=5)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # Remove script and style elements
-        for element in soup(['script', 'style', 'nav', 'header', 'footer', 'aside']):
-            element.decompose()
-
         # Get title
-        title = soup.title.string if soup.title else ""
+        title = ""
+        if soup.title:
+            title = soup.title.string or ""
 
-        # Get main content
-        # Try to find article or main content
-        main_content = soup.find('article') or soup.find('main') or soup.find('body')
+        # Get meta description
+        description = ""
+        meta_desc = soup.find('meta', attrs={'name': 'description'})
+        if meta_desc:
+            description = meta_desc.get('content', '')
 
-        if main_content:
-            text = main_content.get_text(separator='\n', strip=True)
+        # Get og:description as fallback
+        if not description:
+            og_desc = soup.find('meta', attrs={'property': 'og:description'})
+            if og_desc:
+                description = og_desc.get('content', '')
+
+        # Get article content (only first few paragraphs)
+        paragraphs = []
+
+        # Try to find article content
+        article = soup.find('article') or soup.find('main') or soup.find('div', class_=lambda x: x and 'content' in x.lower() if x else False)
+
+        if article:
+            for p in article.find_all('p')[:10]:  # Only first 10 paragraphs
+                text = p.get_text(strip=True)
+                if len(text) > 30:  # Skip short paragraphs
+                    paragraphs.append(text)
         else:
-            text = soup.get_text(separator='\n', strip=True)
+            for p in soup.find_all('p')[:10]:
+                text = p.get_text(strip=True)
+                if len(text) > 30:
+                    paragraphs.append(text)
 
-        # Clean up text - remove extra whitespace
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
-        text = '\n'.join(lines)
+        content = '\n'.join(paragraphs[:5])  # Only use first 5 valid paragraphs
 
-        # Limit text length for API (reduced for faster processing)
-        if len(text) > 5000:
-            text = text[:5000] + "..."
+        # Limit content length
+        if len(content) > 2000:
+            content = content[:2000] + "..."
 
-        return f"標題：{title}\n\n內容：\n{text}"
+        return f"標題：{title}\n\n描述：{description}\n\n內文：\n{content}"
 
     except Exception as e:
         return f"無法抓取網頁內容：{str(e)}"
