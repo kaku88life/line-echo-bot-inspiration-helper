@@ -64,7 +64,7 @@ def fetch_webpage_content(url: str) -> str:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=5)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -89,9 +89,9 @@ def fetch_webpage_content(url: str) -> str:
         lines = [line.strip() for line in text.split('\n') if line.strip()]
         text = '\n'.join(lines)
 
-        # Limit text length for API
-        if len(text) > 15000:
-            text = text[:15000] + "..."
+        # Limit text length for API (reduced for faster processing)
+        if len(text) > 5000:
+            text = text[:5000] + "..."
 
         return f"標題：{title}\n\n內容：\n{text}"
 
@@ -105,20 +105,16 @@ def summarize_webpage(content: str) -> str:
         return "網頁摘要功能未設定，請設定 GEMINI_API_KEY"
 
     try:
-        prompt = f"""請閱讀以下網頁內容，並提供繁體中文的重點摘要：
+        prompt = f"""用繁體中文總結以下網頁的3-5個重點：
 
 {content}
 
-請用以下格式回覆：
-📌 主題：[一句話描述主題]
-
-📝 重點摘要：
-• [重點1]
-• [重點2]
-• [重點3]
-（最多5個重點）
-
-💡 關鍵資訊：[任何重要的數據、日期或關鍵詞]
+格式：
+📌 主題：[一句話]
+📝 重點：
+• 重點1
+• 重點2
+• 重點3
 """
         response = gemini_model.generate_content(prompt)
         return response.text
@@ -195,15 +191,21 @@ def handle_text_message(event):
         line_bot_api = MessagingApi(api_client)
 
         text = event.message.text.strip()
+        print(f"[DEBUG] Received text: {text}")
 
         # Check if message contains a URL
         url = extract_url(text)
+        print(f"[DEBUG] Extracted URL: {url}")
 
         if url:
             try:
-                # Fetch and summarize webpage
+                print(f"[DEBUG] Fetching webpage content...")
                 content = fetch_webpage_content(url)
+                print(f"[DEBUG] Content length: {len(content)}")
+
+                print(f"[DEBUG] Generating summary...")
                 summary = summarize_webpage(content)
+                print(f"[DEBUG] Summary: {summary[:100]}...")
 
                 line_bot_api.reply_message_with_http_info(
                     ReplyMessageRequest(
@@ -211,7 +213,9 @@ def handle_text_message(event):
                         messages=[TextMessage(text=f"🔗 網頁摘要\n{url}\n\n{summary}")],
                     )
                 )
+                print(f"[DEBUG] Reply sent successfully")
             except Exception as e:
+                print(f"[DEBUG] Error: {str(e)}")
                 line_bot_api.reply_message_with_http_info(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
@@ -219,6 +223,7 @@ def handle_text_message(event):
                     )
                 )
         else:
+            print(f"[DEBUG] No URL found, echoing text")
             # Echo back the text
             line_bot_api.reply_message_with_http_info(
                 ReplyMessageRequest(
