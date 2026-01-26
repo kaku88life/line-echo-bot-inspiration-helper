@@ -17,6 +17,9 @@ from linebot.v3.messaging import (
     MessagingApiBlob,
     ReplyMessageRequest,
     TextMessage,
+    QuickReply,
+    QuickReplyItem,
+    MessageAction,
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, AudioMessageContent
 
@@ -46,10 +49,97 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     gemini_model = genai.GenerativeModel('gemini-2.0-flash')
 
+# User states for translation mode (in-memory storage)
+# Structure: { user_id: { "mode": "translate", "target_language": "English" } }
+user_states = {}
+
 # URL pattern for detecting links
 URL_PATTERN = re.compile(
     r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[/\w\.-]*(?:\?[^\s]*)?'
 )
+
+# Translation pattern - matches: 翻譯成英文：你好 / 翻譯成英文:你好 / 翻譯成英文 你好 / 翻譯英文：你好
+TRANSLATE_PATTERN = re.compile(
+    r'^翻譯成?\s*(.+?)\s*[：:\s]\s*(.+)$',
+    re.DOTALL
+)
+
+# Quick Reply language options for translation mode
+QUICK_REPLY_LANGUAGES = [
+    ("英文", "English"),
+    ("日文", "Japanese"),
+    ("韓文", "Korean"),
+    ("越南文", "Vietnamese"),
+    ("泰文", "Thai"),
+    ("印尼文", "Indonesian"),
+    ("簡體中文", "Simplified Chinese"),
+    ("法文", "French"),
+    ("西班牙文", "Spanish"),
+    ("德文", "German"),
+]
+
+# Language name mapping (Chinese name -> language code for OpenAI)
+LANGUAGE_MAP = {
+    # 常用語言
+    "英文": "English",
+    "英語": "English",
+    "日文": "Japanese",
+    "日語": "Japanese",
+    "韓文": "Korean",
+    "韓語": "Korean",
+    "中文": "Traditional Chinese",
+    "繁體中文": "Traditional Chinese",
+    "繁中": "Traditional Chinese",
+    "簡體中文": "Simplified Chinese",
+    "簡中": "Simplified Chinese",
+    # 東南亞語言
+    "越南文": "Vietnamese",
+    "越南語": "Vietnamese",
+    "泰文": "Thai",
+    "泰語": "Thai",
+    "印尼文": "Indonesian",
+    "印尼語": "Indonesian",
+    "馬來文": "Malay",
+    "馬來語": "Malay",
+    "菲律賓文": "Filipino",
+    "菲律賓語": "Filipino",
+    "緬甸文": "Burmese",
+    "緬甸語": "Burmese",
+    "柬埔寨文": "Khmer",
+    "柬埔寨語": "Khmer",
+    "高棉文": "Khmer",
+    "寮文": "Lao",
+    "寮語": "Lao",
+    "寮國文": "Lao",
+    # 歐洲語言
+    "法文": "French",
+    "法語": "French",
+    "德文": "German",
+    "德語": "German",
+    "西班牙文": "Spanish",
+    "西班牙語": "Spanish",
+    "葡萄牙文": "Portuguese",
+    "葡萄牙語": "Portuguese",
+    "義大利文": "Italian",
+    "義大利語": "Italian",
+    "俄文": "Russian",
+    "俄語": "Russian",
+    "荷蘭文": "Dutch",
+    "荷蘭語": "Dutch",
+    # 其他語言
+    "阿拉伯文": "Arabic",
+    "阿拉伯語": "Arabic",
+    "印度文": "Hindi",
+    "印地語": "Hindi",
+    "土耳其文": "Turkish",
+    "土耳其語": "Turkish",
+    "波蘭文": "Polish",
+    "波蘭語": "Polish",
+    "瑞典文": "Swedish",
+    "瑞典語": "Swedish",
+    "希臘文": "Greek",
+    "希臘語": "Greek",
+}
 
 
 def extract_url(text: str) -> str | None:
@@ -215,6 +305,55 @@ def callback():
     return "OK"
 
 
+def translate_text(text: str, target_language: str) -> str:
+    """Use OpenAI to translate text to target language"""
+    if not openai_client:
+        return "翻譯功能未設定，請設定 OPENAI_API_KEY"
+
+    try:
+        prompt = f"""請將以下文字翻譯成{target_language}：
+
+{text}
+
+注意事項：
+1. 只需要輸出翻譯結果，不要加任何解釋或說明
+2. 保持原文的語氣和風格
+3. 如果有專有名詞，請使用當地常用的翻譯方式
+"""
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": f"你是一個專業的翻譯助手，擅長將各種語言翻譯成{target_language}。只輸出翻譯結果，不加任何額外說明。"},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=2000,
+            temperature=0.3
+        )
+        return response.choices[0].message.content
+
+    except Exception as e:
+        return f"翻譯失敗：{str(e)}"
+
+
+def parse_translation_request(text: str) -> tuple[str, str] | None:
+    """Parse translation request and return (target_language, text_to_translate)"""
+    match = TRANSLATE_PATTERN.match(text.strip())
+    if not match:
+        return None
+
+    language_input = match.group(1).strip()
+    text_to_translate = match.group(2).strip()
+
+    # Look up the target language
+    target_language = LANGUAGE_MAP.get(language_input)
+
+    # If not found in map, use the input directly (let OpenAI handle it)
+    if not target_language:
+        target_language = language_input
+
+    return (target_language, text_to_translate)
+
+
 def summarize_text(text: str) -> str:
     """Use OpenAI to summarize text content"""
     if not openai_client:
@@ -258,12 +397,146 @@ def summarize_text(text: str) -> str:
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
-    """Handle text messages - URL summary or text summary"""
+    """Handle text messages - translation, URL summary, or text summary"""
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
 
         text = event.message.text.strip()
-        print(f"[DEBUG] Received text: {text}")
+        user_id = event.source.user_id
+        print(f"[DEBUG] Received text: {text}, user_id: {user_id}")
+
+        # Check if user is in translation mode (waiting for content to translate)
+        if user_id in user_states and user_states[user_id].get("mode") == "translate_waiting":
+            target_language = user_states[user_id].get("target_language")
+            print(f"[DEBUG] User in translation mode, translating to: {target_language}")
+
+            # Check if user wants to exit translation mode
+            if text in ["取消", "離開", "結束", "exit", "cancel"]:
+                del user_states[user_id]
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text="已離開翻譯模式 👋")],
+                    )
+                )
+                return
+
+            # Translate the content
+            try:
+                translated = translate_text(text, target_language)
+                # Keep user in translation mode for continuous translation
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(
+                            text=f"🌐 翻譯結果（{target_language}）\n\n{translated}\n\n─────────\n💡 繼續輸入文字可持續翻譯\n輸入「取消」離開翻譯模式",
+                            quick_reply=QuickReply(items=[
+                                QuickReplyItem(action=MessageAction(label="🚪 離開翻譯模式", text="取消")),
+                                QuickReplyItem(action=MessageAction(label="🔄 換語言", text="翻譯")),
+                            ])
+                        )],
+                    )
+                )
+                print(f"[DEBUG] Translation in mode sent successfully")
+            except Exception as e:
+                print(f"[DEBUG] Translation error: {str(e)}")
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=f"❌ 翻譯失敗：{str(e)}")],
+                    )
+                )
+            return
+
+        # Check if user selected a language from Quick Reply
+        if user_id in user_states and user_states[user_id].get("mode") == "translate_select_language":
+            # Check if the input matches a language
+            selected_language = LANGUAGE_MAP.get(text)
+            if selected_language:
+                user_states[user_id] = {"mode": "translate_waiting", "target_language": selected_language}
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=f"✅ 已選擇翻譯成【{text}】\n\n請輸入要翻譯的內容：\n\n💡 輸入「取消」可離開翻譯模式")],
+                    )
+                )
+                print(f"[DEBUG] Language selected: {selected_language}")
+                return
+            # If input doesn't match a language, treat it as content to translate with default
+            # Or show error - let's show the language selection again
+            if text not in ["取消", "離開", "結束", "exit", "cancel"]:
+                # Check if it's a valid language name not in our quick reply but in the map
+                for lang_name, lang_code in LANGUAGE_MAP.items():
+                    if text == lang_name:
+                        user_states[user_id] = {"mode": "translate_waiting", "target_language": lang_code}
+                        line_bot_api.reply_message_with_http_info(
+                            ReplyMessageRequest(
+                                reply_token=event.reply_token,
+                                messages=[TextMessage(text=f"✅ 已選擇翻譯成【{text}】\n\n請輸入要翻譯的內容：\n\n💡 輸入「取消」可離開翻譯模式")],
+                            )
+                        )
+                        return
+
+        # Check if user wants to enter translation mode (just "翻譯" or "翻譯模式")
+        if text in ["翻譯", "翻譯模式"]:
+            user_states[user_id] = {"mode": "translate_select_language"}
+            quick_reply_items = [
+                QuickReplyItem(action=MessageAction(label=label, text=label))
+                for label, _ in QUICK_REPLY_LANGUAGES
+            ]
+            # Add cancel option
+            quick_reply_items.append(
+                QuickReplyItem(action=MessageAction(label="❌ 取消", text="取消"))
+            )
+
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(
+                        text="🌐 翻譯模式\n\n請選擇要翻譯成的語言：\n\n💡 也可以直接輸入語言名稱（如：韓文、馬來文）",
+                        quick_reply=QuickReply(items=quick_reply_items)
+                    )],
+                )
+            )
+            print(f"[DEBUG] Entered translation mode, showing language selection")
+            return
+
+        # Check if user wants to cancel (outside of translation mode)
+        if text in ["取消", "離開", "結束", "exit", "cancel"]:
+            if user_id in user_states:
+                del user_states[user_id]
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="已取消 👋")],
+                )
+            )
+            return
+
+        # Check if message is a direct translation request (翻譯成英文：你好)
+        translation_request = parse_translation_request(text)
+        if translation_request:
+            target_language, text_to_translate = translation_request
+            print(f"[DEBUG] Translation request - Language: {target_language}, Text: {text_to_translate[:50]}...")
+
+            try:
+                translated = translate_text(text_to_translate, target_language)
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=f"🌐 翻譯結果（{target_language}）\n\n{translated}")],
+                    )
+                )
+                print(f"[DEBUG] Translation sent successfully")
+            except Exception as e:
+                print(f"[DEBUG] Translation error: {str(e)}")
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=f"❌ 翻譯失敗：{str(e)}")],
+                    )
+                )
+            return
 
         # Check if message contains a URL
         url = extract_url(text)
