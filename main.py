@@ -58,9 +58,11 @@ URL_PATTERN = re.compile(
     r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[/\w\.-]*(?:\?[^\s]*)?'
 )
 
-# Translation pattern - matches: 翻譯成英文：你好 / 翻譯成英文:你好 / 翻譯成英文 你好 / 翻譯英文：你好
+# Translation pattern - matches various formats:
+# 翻譯成英文：你好 / 翻譯成英文:你好 / 翻譯成英文 你好 / 翻譯英文：你好
+# 幫我翻譯成英文：你好 / 請翻譯成日文：你好 / 幫我翻譯成越南文 你好
 TRANSLATE_PATTERN = re.compile(
-    r'^翻譯成?\s*(.+?)\s*[：:\s]\s*(.+)$',
+    r'^(?:幫我|請|請幫我)?翻譯成?\s*(.+?)\s*[：:\s]\s*(.+)$',
     re.DOTALL
 )
 
