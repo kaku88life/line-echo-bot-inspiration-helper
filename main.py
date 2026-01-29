@@ -1,6 +1,8 @@
 import os
 import re
 import tempfile
+import time
+import threading
 from flask import Flask, request, abort
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -16,6 +18,7 @@ from linebot.v3.messaging import (
     MessagingApi,
     MessagingApiBlob,
     ReplyMessageRequest,
+    PushMessageRequest,
     TextMessage,
     QuickReply,
     QuickReplyItem,
@@ -50,8 +53,57 @@ if GEMINI_API_KEY:
     gemini_model = genai.GenerativeModel('gemini-2.0-flash')
 
 # User states for translation mode (in-memory storage)
-# Structure: { user_id: { "mode": "translate", "target_language": "English" } }
+# Structure: { user_id: { "mode": "translate", "target_language": "English", "entered_at": timestamp } }
 user_states = {}
+
+# Translation mode timeout (5 minutes)
+TRANSLATION_MODE_TIMEOUT = 5 * 60  # 5 minutes in seconds
+
+
+def check_translation_timeout():
+    """Background thread to check and handle translation mode timeouts"""
+    while True:
+        try:
+            current_time = time.time()
+            users_to_remove = []
+
+            # Find users who have timed out
+            for user_id, state in list(user_states.items()):
+                if state.get("mode") in ["translate_waiting", "translate_select_language"]:
+                    entered_at = state.get("entered_at", current_time)
+                    if current_time - entered_at >= TRANSLATION_MODE_TIMEOUT:
+                        users_to_remove.append(user_id)
+
+            # Remove timed out users and send notification
+            for user_id in users_to_remove:
+                if user_id in user_states:
+                    del user_states[user_id]
+                    print(f"[DEBUG] User {user_id} translation mode timed out")
+
+                    # Send push message to notify user
+                    try:
+                        with ApiClient(configuration) as api_client:
+                            messaging_api = MessagingApi(api_client)
+                            messaging_api.push_message(
+                                PushMessageRequest(
+                                    to=user_id,
+                                    messages=[TextMessage(text="⏰ 翻譯模式已逾時（5分鐘），已自動退出。\n\n如需繼續翻譯，請重新輸入「翻譯」進入翻譯模式。")]
+                                )
+                            )
+                            print(f"[DEBUG] Timeout notification sent to user {user_id}")
+                    except Exception as e:
+                        print(f"[DEBUG] Failed to send timeout notification: {str(e)}")
+
+        except Exception as e:
+            print(f"[DEBUG] Error in timeout checker: {str(e)}")
+
+        # Check every 30 seconds
+        time.sleep(30)
+
+
+# Start background thread for timeout checking
+timeout_thread = threading.Thread(target=check_translation_timeout, daemon=True)
+timeout_thread.start()
 
 # URL pattern for detecting links
 URL_PATTERN = re.compile(
@@ -216,7 +268,7 @@ def summarize_webpage(content: str) -> str:
 
 請用以下格式回覆：
 
-🏷️ 分類：[從以下選擇：科技/商業/新聞/教學/生活/娛樂/其他]
+🏷️ 分類：[從以下選擇：科技/AI/金融/商業/新聞/教學/運動/美食/旅遊/地圖/生活/娛樂/其他]
 
 📌 主題：[一句話描述核心主題]
 
@@ -244,6 +296,53 @@ def summarize_webpage(content: str) -> str:
 
     except Exception as e:
         return f"摘要生成失敗：{str(e)}"
+
+
+def summarize_google_maps(content: str, url: str) -> str:
+    """Use OpenAI to analyze Google Maps location"""
+    if not openai_client:
+        return "地圖分析功能未設定，請設定 OPENAI_API_KEY"
+
+    try:
+        prompt = f"""請分析以下 Google 地圖的地點資訊，用繁體中文提供分類和摘要：
+
+網址：{url}
+頁面內容：{content}
+
+請用以下格式回覆：
+
+🏷️ 分類：地圖
+
+📍 地區：[國家/城市，例如：日本東京、臺灣台北、美國紐約]
+
+🍽️ 類型：[如果是餐廳，請分類：日式/義式/美式/法式/中式/韓式/泰式/越南/印度/墨西哥/歐式/咖啡廳/酒吧/甜點/其他]
+[如果不是餐廳，請說明是什麼類型的地點：景點/飯店/商店/公司/住宅/其他]
+
+📌 地點名稱：[店名或地點名稱]
+
+📝 重點資訊：
+• [營業時間、評分、價位等資訊，如果有的話]
+• [特色或推薦項目]
+• [地址或交通方式]
+
+🎯 一句話總結：[簡短描述這個地點]
+
+注意：如果無法從內容判斷某些資訊，請標註「無法判斷」而非猜測。
+"""
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "你是一個專業的地點分析助手，擅長從 Google 地圖資訊中提取地點類型、地區和詳細資訊。"},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=1000,
+            temperature=0.5
+        )
+        return response.choices[0].message.content
+
+    except Exception as e:
+        return f"地圖分析失敗：{str(e)}"
+
 
 # Known Whisper hallucination patterns
 HALLUCINATION_PATTERNS = [
@@ -423,10 +522,33 @@ def handle_text_message(event):
                 )
                 return
 
+            # Check if user wants to switch language
+            if text in ["翻譯", "翻譯模式", "換語言", "切換語言"]:
+                user_states[user_id] = {"mode": "translate_select_language", "entered_at": time.time()}
+                quick_reply_items = [
+                    QuickReplyItem(action=MessageAction(label=label, text=label))
+                    for label, _ in QUICK_REPLY_LANGUAGES
+                ]
+                quick_reply_items.append(
+                    QuickReplyItem(action=MessageAction(label="❌ 取消", text="取消"))
+                )
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(
+                            text="🌐 切換語言\n\n請選擇要翻譯成的語言：\n\n💡 也可以直接輸入語言名稱（如：韓文、馬來文）",
+                            quick_reply=QuickReply(items=quick_reply_items)
+                        )],
+                    )
+                )
+                return
+
             # Translate the content
             try:
                 translated = translate_text(text, target_language)
                 # Keep user in translation mode for continuous translation
+                # Reset timeout on each translation
+                user_states[user_id]["entered_at"] = time.time()
                 line_bot_api.reply_message_with_http_info(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
@@ -434,7 +556,7 @@ def handle_text_message(event):
                             text=f"🌐 翻譯結果（{target_language}）\n\n{translated}\n\n─────────\n💡 繼續輸入文字可持續翻譯\n輸入「取消」離開翻譯模式",
                             quick_reply=QuickReply(items=[
                                 QuickReplyItem(action=MessageAction(label="🚪 離開翻譯模式", text="取消")),
-                                QuickReplyItem(action=MessageAction(label="🔄 換語言", text="翻譯")),
+                                QuickReplyItem(action=MessageAction(label="🔄 切換語言", text="切換語言")),
                             ])
                         )],
                     )
@@ -455,7 +577,7 @@ def handle_text_message(event):
             # Check if the input matches a language
             selected_language = LANGUAGE_MAP.get(text)
             if selected_language:
-                user_states[user_id] = {"mode": "translate_waiting", "target_language": selected_language}
+                user_states[user_id] = {"mode": "translate_waiting", "target_language": selected_language, "entered_at": time.time()}
                 line_bot_api.reply_message_with_http_info(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
@@ -470,7 +592,7 @@ def handle_text_message(event):
                 # Check if it's a valid language name not in our quick reply but in the map
                 for lang_name, lang_code in LANGUAGE_MAP.items():
                     if text == lang_name:
-                        user_states[user_id] = {"mode": "translate_waiting", "target_language": lang_code}
+                        user_states[user_id] = {"mode": "translate_waiting", "target_language": lang_code, "entered_at": time.time()}
                         line_bot_api.reply_message_with_http_info(
                             ReplyMessageRequest(
                                 reply_token=event.reply_token,
@@ -481,7 +603,7 @@ def handle_text_message(event):
 
         # Check if user wants to enter translation mode (just "翻譯" or "翻譯模式")
         if text in ["翻譯", "翻譯模式"]:
-            user_states[user_id] = {"mode": "translate_select_language"}
+            user_states[user_id] = {"mode": "translate_select_language", "entered_at": time.time()}
             quick_reply_items = [
                 QuickReplyItem(action=MessageAction(label=label, text=label))
                 for label, _ in QUICK_REPLY_LANGUAGES
@@ -546,12 +668,24 @@ def handle_text_message(event):
 
         if url:
             try:
-                print(f"[DEBUG] Fetching webpage content...")
-                content = fetch_webpage_content(url)
-                print(f"[DEBUG] Content length: {len(content)}")
+                # Check if it's a Google Maps URL
+                is_google_maps = any(pattern in url.lower() for pattern in [
+                    'maps.google.com', 'google.com/maps', 'goo.gl/maps',
+                    'maps.app.goo.gl', '/maps/', 'maps.app'
+                ])
 
-                print(f"[DEBUG] Generating webpage summary...")
-                summary = summarize_webpage(content)
+                if is_google_maps:
+                    print(f"[DEBUG] Detected Google Maps URL, fetching location info...")
+                    content = fetch_webpage_content(url)
+                    print(f"[DEBUG] Maps content length: {len(content)}")
+                    summary = summarize_google_maps(content, url)
+                else:
+                    print(f"[DEBUG] Fetching webpage content...")
+                    content = fetch_webpage_content(url)
+                    print(f"[DEBUG] Content length: {len(content)}")
+
+                    print(f"[DEBUG] Generating webpage summary...")
+                    summary = summarize_webpage(content)
                 print(f"[DEBUG] Summary: {summary[:100]}...")
 
                 line_bot_api.reply_message_with_http_info(
