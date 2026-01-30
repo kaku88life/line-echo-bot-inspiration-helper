@@ -9,6 +9,7 @@ from openai import OpenAI
 import google.generativeai as genai
 import requests
 from bs4 import BeautifulSoup
+from notion_client import Client as NotionClient
 
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -34,6 +35,8 @@ CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+NOTION_API_KEY = os.getenv("NOTION_API_KEY")
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
 if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET:
     raise ValueError("Please set LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET in .env file")
@@ -51,6 +54,12 @@ gemini_model = None
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+
+# Notion client for saving content
+notion_client = None
+if NOTION_API_KEY and NOTION_DATABASE_ID:
+    notion_client = NotionClient(auth=NOTION_API_KEY)
+    print("[DEBUG] Notion client initialized")
 
 # User states for translation mode (in-memory storage)
 # Structure: { user_id: { "mode": "translate", "target_language": "English", "entered_at": timestamp } }
@@ -393,6 +402,110 @@ def is_hallucination(text: str) -> bool:
     return False
 
 
+def parse_summary_response(response: str) -> dict:
+    """Parse category and keywords from AI summary response"""
+    result = {
+        "category": "其他",
+        "keywords": [],
+        "title": ""
+    }
+
+    # Parse 🏷️ 分類：xxx
+    category_match = re.search(r'🏷️\s*分類[：:]\s*(.+?)(?:\n|$)', response)
+    if category_match:
+        result["category"] = category_match.group(1).strip()
+
+    # Parse 📌 主題：xxx or 📌 地點名稱：xxx
+    title_match = re.search(r'📌\s*(?:主題|地點名稱)[：:]\s*(.+?)(?:\n|$)', response)
+    if title_match:
+        result["title"] = title_match.group(1).strip()
+
+    # Parse 💡 關鍵字：xxx, yyy, zzz or 💡 關鍵資訊：xxx
+    keywords_match = re.search(r'💡\s*關鍵(?:字|資訊)[：:]\s*(.+?)(?:\n\n|🎯|$)', response, re.DOTALL)
+    if keywords_match:
+        keywords_text = keywords_match.group(1).strip()
+        # Handle comma-separated keywords
+        if '、' in keywords_text or ',' in keywords_text:
+            keywords = re.split(r'[、,，]', keywords_text)
+            result["keywords"] = [kw.strip() for kw in keywords if kw.strip()]
+        elif '•' in keywords_text:
+            # Handle bullet points
+            keywords = keywords_text.split('•')
+            result["keywords"] = [kw.strip() for kw in keywords if kw.strip()]
+
+    return result
+
+
+def save_to_notion(
+    title: str,
+    content_type: str,
+    category: str,
+    content: str,
+    source_url: str = None,
+    original_text: str = None,
+    keywords: list[str] = None,
+    target_language: str = None,
+    user_id: str = None
+) -> bool:
+    """Save content to Notion database
+
+    Args:
+        title: Main title/subject
+        content_type: "URL摘要" | "語音轉文字" | "翻譯"
+        category: Category from the predefined list
+        content: Full summary/transcription/translation content
+        source_url: Original URL (for URL summaries)
+        original_text: Original text (for translations)
+        keywords: List of keywords extracted by AI
+        target_language: Target language (for translations)
+        user_id: LINE User ID
+
+    Returns:
+        True if saved successfully, False otherwise
+    """
+    if not notion_client or not NOTION_DATABASE_ID:
+        print("[DEBUG] Notion not configured, skipping save")
+        return False
+
+    try:
+        # Build properties
+        properties = {
+            "標題": {"title": [{"text": {"content": title[:100] if title else "無標題"}}]},
+            "類型": {"select": {"name": content_type}},
+            "分類": {"select": {"name": category}},
+            "內容": {"rich_text": [{"text": {"content": content[:2000] if content else ""}}]},
+        }
+
+        # Add optional fields
+        if source_url:
+            properties["來源網址"] = {"url": source_url}
+
+        if original_text:
+            properties["原始文字"] = {"rich_text": [{"text": {"content": original_text[:2000]}}]}
+
+        if keywords:
+            properties["關鍵字"] = {"multi_select": [{"name": kw[:100]} for kw in keywords[:10]]}
+
+        if target_language:
+            properties["目標語言"] = {"select": {"name": target_language}}
+
+        if user_id:
+            properties["LINE 用戶"] = {"rich_text": [{"text": {"content": user_id}}]}
+
+        # Create page in database
+        notion_client.pages.create(
+            parent={"database_id": NOTION_DATABASE_ID},
+            properties=properties
+        )
+
+        print(f"[DEBUG] Saved to Notion: {title[:50]}...")
+        return True
+
+    except Exception as e:
+        print(f"[DEBUG] Notion save error: {str(e)}")
+        return False
+
+
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
@@ -562,6 +675,17 @@ def handle_text_message(event):
                     )
                 )
                 print(f"[DEBUG] Translation in mode sent successfully")
+
+                # Save to Notion
+                save_to_notion(
+                    title=f"翻譯：{text[:50]}...",
+                    content_type="翻譯",
+                    category="翻譯",
+                    content=translated,
+                    original_text=text,
+                    target_language=target_language,
+                    user_id=user_id
+                )
             except Exception as e:
                 print(f"[DEBUG] Translation error: {str(e)}")
                 line_bot_api.reply_message_with_http_info(
@@ -652,6 +776,17 @@ def handle_text_message(event):
                     )
                 )
                 print(f"[DEBUG] Translation sent successfully")
+
+                # Save to Notion
+                save_to_notion(
+                    title=f"翻譯：{text_to_translate[:50]}...",
+                    content_type="翻譯",
+                    category="翻譯",
+                    content=translated,
+                    original_text=text_to_translate,
+                    target_language=target_language,
+                    user_id=user_id
+                )
             except Exception as e:
                 print(f"[DEBUG] Translation error: {str(e)}")
                 line_bot_api.reply_message_with_http_info(
@@ -695,6 +830,18 @@ def handle_text_message(event):
                     )
                 )
                 print(f"[DEBUG] Reply sent successfully")
+
+                # Save to Notion
+                parsed = parse_summary_response(summary)
+                save_to_notion(
+                    title=parsed["title"] or url[:50],
+                    content_type="URL摘要",
+                    category=parsed["category"],
+                    content=summary,
+                    source_url=url,
+                    keywords=parsed["keywords"],
+                    user_id=user_id
+                )
             except Exception as e:
                 print(f"[DEBUG] Error: {str(e)}")
                 line_bot_api.reply_message_with_http_info(
@@ -787,6 +934,16 @@ def handle_audio_message(event):
                     reply_token=event.reply_token,
                     messages=[TextMessage(text=f"📝 語音轉文字：\n\n{result_text}")],
                 )
+            )
+
+            # Save to Notion
+            user_id = event.source.user_id
+            save_to_notion(
+                title=f"語音轉文字：{result_text[:50]}...",
+                content_type="語音轉文字",
+                category="筆記",
+                content=result_text,
+                user_id=user_id
             )
 
         except Exception as e:
