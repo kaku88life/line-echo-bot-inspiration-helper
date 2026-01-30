@@ -130,11 +130,22 @@ URL_PATTERN = re.compile(
 )
 
 # Social media URL patterns
-FACEBOOK_PATTERN = re.compile(
+# Single post patterns
+FACEBOOK_POST_PATTERN = re.compile(
     r'https?://(?:www\.|m\.|web\.)?facebook\.com/(?:[\w.]+/)?(?:posts|videos|photos|watch|story\.php|permalink\.php|reel|share)[\w/?=&.-]*'
+)
+# Facebook page/profile patterns (for multi-post scraping)
+FACEBOOK_PAGE_PATTERN = re.compile(
+    r'https?://(?:www\.|m\.|web\.)?facebook\.com/([\w.]+)/?(?:\?.*)?$'
 )
 THREADS_PATTERN = re.compile(
     r'https?://(?:www\.)?threads\.net/@[\w.]+/post/[\w]+'
+)
+
+# Command pattern for multi-post scraping: "爬 5 篇 [URL]" or "爬取 10 篇 [URL]"
+SCRAPE_MULTI_PATTERN = re.compile(
+    r'^爬取?\s*(\d+)\s*篇\s*(https?://\S+)',
+    re.IGNORECASE
 )
 
 # Translation pattern - matches various formats:
@@ -229,61 +240,137 @@ def extract_url(text: str) -> str | None:
     return match.group(0) if match else None
 
 
-def detect_social_platform(url: str) -> str | None:
-    """Detect social media platform type"""
-    if FACEBOOK_PATTERN.match(url):
-        return "facebook"
+def detect_social_platform(url: str) -> tuple[str | None, str]:
+    """Detect social media platform type and URL type
+
+    Returns:
+        Tuple of (platform, url_type) where url_type is "post" or "page"
+    """
+    if FACEBOOK_POST_PATTERN.match(url):
+        return ("facebook", "post")
+    if FACEBOOK_PAGE_PATTERN.match(url):
+        return ("facebook", "page")
     if THREADS_PATTERN.match(url):
-        return "threads"
-    return None
+        return ("threads", "post")
+    return (None, "")
 
 
-def scrape_facebook_post(url: str) -> dict | None:
-    """Scrape Facebook post using Apify"""
+def scrape_facebook_post(url: str, max_posts: int = 1) -> list[dict]:
+    """Scrape Facebook post(s) using Apify
+
+    Args:
+        url: Facebook URL (post or page)
+        max_posts: Maximum number of posts to scrape (default 1)
+
+    Returns:
+        List of post data dictionaries
+    """
     if not apify_client:
         print("[DEBUG] Apify client not configured")
-        return None
+        return []
 
     try:
-        print(f"[DEBUG] Scraping Facebook post: {url}")
+        print(f"[DEBUG] Scraping Facebook URL: {url}, max_posts: {max_posts}")
         run_input = {
             "startUrls": [{"url": url}],
-            "resultsLimit": 1,
+            "resultsLimit": max_posts,
         }
         run = apify_client.actor("apify/facebook-posts-scraper").call(run_input=run_input)
         items = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
         if items:
-            print(f"[DEBUG] Facebook scrape successful")
-            return items[0]
+            print(f"[DEBUG] Facebook scrape successful, got {len(items)} posts")
+            return items
         print("[DEBUG] No items returned from Facebook scraper")
-        return None
+        return []
     except Exception as e:
         print(f"[DEBUG] Facebook scrape error: {str(e)}")
-        return None
+        return []
 
 
-def scrape_threads_post(url: str) -> dict | None:
-    """Scrape Threads post using Apify"""
+def scrape_threads_post(url: str, max_posts: int = 1) -> list[dict]:
+    """Scrape Threads post(s) using Apify
+
+    Args:
+        url: Threads URL
+        max_posts: Maximum number of posts to scrape (default 1)
+
+    Returns:
+        List of post data dictionaries
+    """
     if not apify_client:
         print("[DEBUG] Apify client not configured")
-        return None
+        return []
 
     try:
         print(f"[DEBUG] Scraping Threads post: {url}")
         run_input = {
             "postUrls": [url],
-            "maxItems": 1,
+            "maxItems": max_posts,
         }
         run = apify_client.actor("apify/threads-scraper").call(run_input=run_input)
         items = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
         if items:
-            print(f"[DEBUG] Threads scrape successful")
-            return items[0]
+            print(f"[DEBUG] Threads scrape successful, got {len(items)} posts")
+            return items
         print("[DEBUG] No items returned from Threads scraper")
-        return None
+        return []
     except Exception as e:
         print(f"[DEBUG] Threads scrape error: {str(e)}")
-        return None
+        return []
+
+
+def setup_notion_social_database():
+    """Initialize Notion social database with required properties"""
+    if not notion_client or not NOTION_SOCIAL_DATABASE_ID:
+        print("[DEBUG] Notion not configured for social database setup")
+        return False
+
+    try:
+        # Update database with required properties
+        notion_client.databases.update(
+            database_id=NOTION_SOCIAL_DATABASE_ID,
+            title=[{"text": {"content": "社群分析"}}],
+            properties={
+                "標題": {"title": {}},
+                "平台": {
+                    "select": {
+                        "options": [
+                            {"name": "Facebook", "color": "blue"},
+                            {"name": "Threads", "color": "purple"},
+                        ]
+                    }
+                },
+                "帳號": {"rich_text": {}},
+                "內容摘要": {"rich_text": {}},
+                "原始內容": {"rich_text": {}},
+                "關鍵字": {"multi_select": {"options": []}},
+                "Likes": {"number": {"format": "number"}},
+                "留言數": {"number": {"format": "number"}},
+                "分享數": {"number": {"format": "number"}},
+                "來源網址": {"url": {}},
+                "類型": {
+                    "select": {
+                        "options": [
+                            {"name": "資訊分享", "color": "blue"},
+                            {"name": "個人心得", "color": "green"},
+                            {"name": "產品推廣", "color": "orange"},
+                            {"name": "新聞報導", "color": "red"},
+                            {"name": "教學內容", "color": "yellow"},
+                            {"name": "娛樂內容", "color": "pink"},
+                            {"name": "活動宣傳", "color": "purple"},
+                            {"name": "其他", "color": "gray"},
+                        ]
+                    }
+                },
+                "LINE 用戶": {"rich_text": {}},
+                "建立時間": {"created_time": {}},
+            }
+        )
+        print("[DEBUG] Notion social database setup completed")
+        return True
+    except Exception as e:
+        print(f"[DEBUG] Notion database setup error: {str(e)}")
+        return False
 
 
 def normalize_social_post_data(post_data: dict, platform: str) -> dict:
@@ -1058,6 +1145,101 @@ def handle_text_message(event):
                 )
             return
 
+        # Check for multi-post scraping command: "爬 5 篇 [URL]"
+        multi_match = SCRAPE_MULTI_PATTERN.match(text)
+        if multi_match:
+            max_posts = min(int(multi_match.group(1)), 20)  # Cap at 20 posts
+            url = multi_match.group(2)
+            print(f"[DEBUG] Multi-post scraping: {max_posts} posts from {url}")
+
+            if not apify_client:
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text="❌ 社群爬蟲功能未設定，請設定 APIFY_API_KEY")],
+                    )
+                )
+                return
+
+            platform, url_type = detect_social_platform(url)
+            if not platform:
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text="❌ 不支援的網址格式，請提供 Facebook 或 Threads 網址")],
+                    )
+                )
+                return
+
+            # Send initial response
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=f"🔄 正在爬取 {max_posts} 篇貼文，請稍候...")],
+                )
+            )
+
+            # Scrape multiple posts
+            if platform == "facebook":
+                posts = scrape_facebook_post(url, max_posts)
+            else:
+                posts = scrape_threads_post(url, max_posts)
+
+            if not posts:
+                # Use push message since we already replied
+                with ApiClient(configuration) as api_client2:
+                    messaging_api2 = MessagingApi(api_client2)
+                    messaging_api2.push_message(
+                        PushMessageRequest(
+                            to=user_id,
+                            messages=[TextMessage(text=f"❌ 無法爬取貼文，可能是私人帳號或網址無效")]
+                        )
+                    )
+                return
+
+            # Process each post
+            platform_name = "Facebook" if platform == "facebook" else "Threads"
+            saved_count = 0
+
+            for i, post_data in enumerate(posts):
+                try:
+                    normalized_data = normalize_social_post_data(post_data, platform)
+                    summary = summarize_social_post(normalized_data, platform)
+                    parsed = parse_social_summary_response(summary)
+
+                    # Get post URL if available
+                    post_url = post_data.get("url") or post_data.get("postUrl") or url
+
+                    # Save to Notion
+                    if save_social_to_notion(
+                        platform=platform_name,
+                        username=normalized_data.get("username", "未知"),
+                        summary=parsed.get("summary", ""),
+                        original_text=normalized_data.get("text", ""),
+                        keywords=parsed.get("keywords", []),
+                        likes=normalized_data.get("likes", 0),
+                        comments=normalized_data.get("comments", 0),
+                        shares=normalized_data.get("shares", 0),
+                        source_url=post_url,
+                        post_type=parsed.get("post_type", "其他"),
+                        user_id=user_id
+                    ):
+                        saved_count += 1
+                        print(f"[DEBUG] Saved post {i+1}/{len(posts)}")
+                except Exception as e:
+                    print(f"[DEBUG] Error processing post {i+1}: {str(e)}")
+
+            # Send completion message
+            with ApiClient(configuration) as api_client2:
+                messaging_api2 = MessagingApi(api_client2)
+                messaging_api2.push_message(
+                    PushMessageRequest(
+                        to=user_id,
+                        messages=[TextMessage(text=f"✅ 完成！已爬取 {len(posts)} 篇貼文，成功存入 Notion {saved_count} 篇")]
+                    )
+                )
+            return
+
         # Check if message contains a URL
         url = extract_url(text)
         print(f"[DEBUG] Extracted URL: {url}")
@@ -1065,9 +1247,9 @@ def handle_text_message(event):
         if url:
             try:
                 # Priority 1: Check if it's a social media URL (Facebook or Threads)
-                social_platform = detect_social_platform(url)
-                if social_platform:
-                    print(f"[DEBUG] Detected {social_platform} URL, scraping post...")
+                platform, url_type = detect_social_platform(url)
+                if platform:
+                    print(f"[DEBUG] Detected {platform} {url_type} URL, scraping post...")
 
                     # Check if Apify is configured
                     if not apify_client:
@@ -1079,32 +1261,48 @@ def handle_text_message(event):
                         )
                         return
 
-                    # Scrape post based on platform
-                    if social_platform == "facebook":
-                        post_data = scrape_facebook_post(url)
-                    else:  # threads
-                        post_data = scrape_threads_post(url)
-
-                    if not post_data:
+                    # If it's a page URL, ask user how many posts to scrape
+                    if url_type == "page":
                         line_bot_api.reply_message_with_http_info(
                             ReplyMessageRequest(
                                 reply_token=event.reply_token,
-                                messages=[TextMessage(text=f"❌ 無法爬取 {social_platform.title()} 貼文，可能是私人貼文或網址無效")],
+                                messages=[TextMessage(
+                                    text=f"📘 偵測到 Facebook 粉專/個人頁面\n\n請問要爬取幾篇貼文？\n\n請輸入：爬 [數量] 篇 {url}\n例如：爬 5 篇 {url}",
+                                    quick_reply=QuickReply(items=[
+                                        QuickReplyItem(action=MessageAction(label="爬 3 篇", text=f"爬 3 篇 {url}")),
+                                        QuickReplyItem(action=MessageAction(label="爬 5 篇", text=f"爬 5 篇 {url}")),
+                                        QuickReplyItem(action=MessageAction(label="爬 10 篇", text=f"爬 10 篇 {url}")),
+                                    ])
+                                )],
                             )
                         )
                         return
 
+                    # Single post - scrape and analyze
+                    posts = scrape_facebook_post(url, 1) if platform == "facebook" else scrape_threads_post(url, 1)
+
+                    if not posts:
+                        line_bot_api.reply_message_with_http_info(
+                            ReplyMessageRequest(
+                                reply_token=event.reply_token,
+                                messages=[TextMessage(text=f"❌ 無法爬取 {platform.title()} 貼文，可能是私人貼文或網址無效")],
+                            )
+                        )
+                        return
+
+                    post_data = posts[0]
+
                     # Normalize data
-                    normalized_data = normalize_social_post_data(post_data, social_platform)
+                    normalized_data = normalize_social_post_data(post_data, platform)
                     print(f"[DEBUG] Normalized data: {normalized_data}")
 
                     # Generate AI summary
-                    summary = summarize_social_post(normalized_data, social_platform)
+                    summary = summarize_social_post(normalized_data, platform)
                     parsed = parse_social_summary_response(summary)
 
                     # Build response message
-                    platform_emoji = "📘" if social_platform == "facebook" else "🧵"
-                    platform_name = "Facebook" if social_platform == "facebook" else "Threads"
+                    platform_emoji = "📘" if platform == "facebook" else "🧵"
+                    platform_name = "Facebook" if platform == "facebook" else "Threads"
 
                     response_text = f"{platform_emoji} {platform_name} 貼文分析\n{url}\n\n{summary}"
 
@@ -1290,6 +1488,14 @@ def handle_audio_message(event):
                     messages=[TextMessage(text=f"語音轉文字失敗：{str(e)}")],
                 )
             )
+
+
+# Initialize Notion social database on startup
+if notion_client and NOTION_SOCIAL_DATABASE_ID:
+    try:
+        setup_notion_social_database()
+    except Exception as e:
+        print(f"[DEBUG] Social database init error: {str(e)}")
 
 
 if __name__ == "__main__":
