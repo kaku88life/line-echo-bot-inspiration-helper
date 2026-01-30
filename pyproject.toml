@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "apify-client>=1.0.0",
     "beautifulsoup4>=4.14.3",
     "flask>=3.1.2",
     "gevent>=25.9.1",

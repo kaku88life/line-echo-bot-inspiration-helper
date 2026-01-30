@@ -11,6 +11,8 @@ import requests
 from bs4 import BeautifulSoup
 from notion_client import Client as NotionClient
 
+from apify_client import ApifyClient
+
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -37,6 +39,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
+NOTION_SOCIAL_DATABASE_ID = os.getenv("NOTION_SOCIAL_DATABASE_ID")
+APIFY_API_KEY = os.getenv("APIFY_API_KEY")
 
 if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET:
     raise ValueError("Please set LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET in .env file")
@@ -60,6 +64,12 @@ notion_client = None
 if NOTION_API_KEY and NOTION_DATABASE_ID:
     notion_client = NotionClient(auth=NOTION_API_KEY)
     print("[DEBUG] Notion client initialized")
+
+# Apify client for social media scraping
+apify_client = None
+if APIFY_API_KEY:
+    apify_client = ApifyClient(APIFY_API_KEY)
+    print("[DEBUG] Apify client initialized")
 
 # User states for translation mode (in-memory storage)
 # Structure: { user_id: { "mode": "translate", "target_language": "English", "entered_at": timestamp } }
@@ -117,6 +127,14 @@ timeout_thread.start()
 # URL pattern for detecting links
 URL_PATTERN = re.compile(
     r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[/\w\.-]*(?:\?[^\s]*)?'
+)
+
+# Social media URL patterns
+FACEBOOK_PATTERN = re.compile(
+    r'https?://(?:www\.|m\.|web\.)?facebook\.com/(?:[\w.]+/)?(?:posts|videos|photos|watch|story\.php|permalink\.php|reel|share)[\w/?=&.-]*'
+)
+THREADS_PATTERN = re.compile(
+    r'https?://(?:www\.)?threads\.net/@[\w.]+/post/[\w]+'
 )
 
 # Translation pattern - matches various formats:
@@ -209,6 +227,246 @@ def extract_url(text: str) -> str | None:
     """Extract the first URL from text"""
     match = URL_PATTERN.search(text)
     return match.group(0) if match else None
+
+
+def detect_social_platform(url: str) -> str | None:
+    """Detect social media platform type"""
+    if FACEBOOK_PATTERN.match(url):
+        return "facebook"
+    if THREADS_PATTERN.match(url):
+        return "threads"
+    return None
+
+
+def scrape_facebook_post(url: str) -> dict | None:
+    """Scrape Facebook post using Apify"""
+    if not apify_client:
+        print("[DEBUG] Apify client not configured")
+        return None
+
+    try:
+        print(f"[DEBUG] Scraping Facebook post: {url}")
+        run_input = {
+            "startUrls": [{"url": url}],
+            "resultsLimit": 1,
+        }
+        run = apify_client.actor("apify/facebook-posts-scraper").call(run_input=run_input)
+        items = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
+        if items:
+            print(f"[DEBUG] Facebook scrape successful")
+            return items[0]
+        print("[DEBUG] No items returned from Facebook scraper")
+        return None
+    except Exception as e:
+        print(f"[DEBUG] Facebook scrape error: {str(e)}")
+        return None
+
+
+def scrape_threads_post(url: str) -> dict | None:
+    """Scrape Threads post using Apify"""
+    if not apify_client:
+        print("[DEBUG] Apify client not configured")
+        return None
+
+    try:
+        print(f"[DEBUG] Scraping Threads post: {url}")
+        run_input = {
+            "postUrls": [url],
+            "maxItems": 1,
+        }
+        run = apify_client.actor("apify/threads-scraper").call(run_input=run_input)
+        items = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
+        if items:
+            print(f"[DEBUG] Threads scrape successful")
+            return items[0]
+        print("[DEBUG] No items returned from Threads scraper")
+        return None
+    except Exception as e:
+        print(f"[DEBUG] Threads scrape error: {str(e)}")
+        return None
+
+
+def normalize_social_post_data(post_data: dict, platform: str) -> dict:
+    """Normalize post data from different platforms to a common format"""
+    if platform == "facebook":
+        return {
+            "username": post_data.get("pageName") or post_data.get("user", {}).get("name") or "未知",
+            "text": post_data.get("text") or post_data.get("postText") or "",
+            "likes": post_data.get("likes") or post_data.get("likesCount") or 0,
+            "comments": post_data.get("comments") or post_data.get("commentsCount") or 0,
+            "shares": post_data.get("shares") or post_data.get("sharesCount") or 0,
+        }
+    elif platform == "threads":
+        return {
+            "username": post_data.get("ownerUsername") or post_data.get("author", {}).get("username") or "未知",
+            "text": post_data.get("text") or post_data.get("caption") or "",
+            "likes": post_data.get("likeCount") or post_data.get("likesCount") or 0,
+            "comments": post_data.get("replyCount") or post_data.get("commentsCount") or 0,
+            "shares": post_data.get("repostCount") or 0,
+        }
+    return {
+        "username": "未知",
+        "text": "",
+        "likes": 0,
+        "comments": 0,
+        "shares": 0,
+    }
+
+
+def summarize_social_post(post_data: dict, platform: str) -> str:
+    """Use AI to analyze social media post"""
+    if not openai_client:
+        return "社群分析功能未設定，請設定 OPENAI_API_KEY"
+
+    platform_name = "Facebook" if platform == "facebook" else "Threads"
+
+    try:
+        prompt = f"""分析以下 {platform_name} 貼文：
+帳號：{post_data.get('username', '未知')}
+內容：{post_data.get('text', '')}
+互動數據：{post_data.get('likes', 0)} 讚、{post_data.get('comments', 0)} 留言、{post_data.get('shares', 0)} 分享
+
+請用以下格式回覆（繁體中文）：
+
+📌 帳號：{post_data.get('username', '未知')}
+
+📝 摘要：[用2-3句話摘要貼文內容的重點]
+
+🔑 關鍵字：[3-5個關鍵字，用頓號分隔]
+
+📊 互動數據：{post_data.get('likes', 0)} 讚 | {post_data.get('comments', 0)} 留言 | {post_data.get('shares', 0)} 分享
+
+🎯 貼文類型：[只選一個：資訊分享、個人心得、產品推廣、新聞報導、教學內容、娛樂內容、活動宣傳、其他]
+"""
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "你是一個專業的社群媒體分析助手，擅長分析貼文內容並提取關鍵資訊。"},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=1000,
+            temperature=0.7
+        )
+        return response.choices[0].message.content
+
+    except Exception as e:
+        return f"社群分析失敗：{str(e)}"
+
+
+def parse_social_summary_response(response: str) -> dict:
+    """Parse summary and keywords from social post AI response"""
+    result = {
+        "summary": "",
+        "keywords": [],
+        "post_type": "其他",
+    }
+
+    # Parse 📝 摘要：xxx
+    summary_match = re.search(r'📝\s*摘要[：:]\s*(.+?)(?:\n\n|🔑|$)', response, re.DOTALL)
+    if summary_match:
+        result["summary"] = summary_match.group(1).strip()
+
+    # Parse 🔑 關鍵字：xxx
+    keywords_match = re.search(r'🔑\s*關鍵字[：:]\s*(.+?)(?:\n\n|📊|$)', response, re.DOTALL)
+    if keywords_match:
+        keywords_text = keywords_match.group(1).strip()
+        keywords = re.split(r'[、,，]', keywords_text)
+        result["keywords"] = [kw.strip() for kw in keywords if kw.strip() and len(kw.strip()) < 50]
+
+    # Parse 🎯 貼文類型：xxx
+    type_match = re.search(r'🎯\s*貼文類型[：:]\s*(.+?)(?:\n|$)', response)
+    if type_match:
+        result["post_type"] = type_match.group(1).strip()
+
+    return result
+
+
+def save_social_to_notion(
+    platform: str,
+    username: str,
+    summary: str,
+    original_text: str,
+    keywords: list[str],
+    likes: int,
+    comments: int,
+    shares: int,
+    source_url: str,
+    post_type: str = "其他",
+    user_id: str = None
+) -> bool:
+    """Save social media post to Notion database
+
+    Args:
+        platform: "Facebook" | "Threads"
+        username: Account name
+        summary: AI-generated summary
+        original_text: Original post content
+        keywords: List of keywords
+        likes: Like count
+        comments: Comment count
+        shares: Share count
+        source_url: Original post URL
+        post_type: Post type category
+        user_id: LINE User ID
+
+    Returns:
+        True if saved successfully, False otherwise
+    """
+    if not notion_client:
+        print("[DEBUG] Notion not configured, skipping save")
+        return False
+
+    # Use dedicated social database if available, otherwise use default
+    database_id = NOTION_SOCIAL_DATABASE_ID or NOTION_DATABASE_ID
+    if not database_id:
+        print("[DEBUG] No Notion database ID configured")
+        return False
+
+    try:
+        # Build title: account name + summary snippet
+        title = f"[{platform}] {username}: {summary[:50]}..." if len(summary) > 50 else f"[{platform}] {username}: {summary}"
+
+        properties = {
+            "標題": {"title": [{"text": {"content": title[:100]}}]},
+            "平台": {"select": {"name": platform}},
+            "帳號": {"rich_text": [{"text": {"content": username[:100]}}]},
+            "內容摘要": {"rich_text": [{"text": {"content": summary[:2000]}}]},
+            "原始內容": {"rich_text": [{"text": {"content": original_text[:2000] if original_text else ""}}]},
+            "來源網址": {"url": source_url},
+        }
+
+        # Add keywords as multi-select
+        if keywords:
+            properties["關鍵字"] = {"multi_select": [{"name": kw[:100]} for kw in keywords[:10]]}
+
+        # Add numeric fields (only if the database has these columns)
+        # These will be added if the database supports them
+        try:
+            properties["Likes"] = {"number": likes}
+            properties["留言數"] = {"number": comments}
+            properties["分享數"] = {"number": shares}
+        except Exception:
+            pass
+
+        # Add category/type
+        if post_type:
+            properties["類型"] = {"select": {"name": post_type}}
+
+        if user_id:
+            properties["LINE 用戶"] = {"rich_text": [{"text": {"content": user_id}}]}
+
+        # Create page in database
+        notion_client.pages.create(
+            parent={"database_id": database_id},
+            properties=properties
+        )
+
+        print(f"[DEBUG] Saved social post to Notion: {title[:50]}...")
+        return True
+
+    except Exception as e:
+        print(f"[DEBUG] Notion save error: {str(e)}")
+        return False
 
 
 def fetch_webpage_content(url: str) -> str:
@@ -806,7 +1064,75 @@ def handle_text_message(event):
 
         if url:
             try:
-                # Check if it's a Google Maps URL
+                # Priority 1: Check if it's a social media URL (Facebook or Threads)
+                social_platform = detect_social_platform(url)
+                if social_platform:
+                    print(f"[DEBUG] Detected {social_platform} URL, scraping post...")
+
+                    # Check if Apify is configured
+                    if not apify_client:
+                        line_bot_api.reply_message_with_http_info(
+                            ReplyMessageRequest(
+                                reply_token=event.reply_token,
+                                messages=[TextMessage(text="❌ 社群爬蟲功能未設定，請設定 APIFY_API_KEY")],
+                            )
+                        )
+                        return
+
+                    # Scrape post based on platform
+                    if social_platform == "facebook":
+                        post_data = scrape_facebook_post(url)
+                    else:  # threads
+                        post_data = scrape_threads_post(url)
+
+                    if not post_data:
+                        line_bot_api.reply_message_with_http_info(
+                            ReplyMessageRequest(
+                                reply_token=event.reply_token,
+                                messages=[TextMessage(text=f"❌ 無法爬取 {social_platform.title()} 貼文，可能是私人貼文或網址無效")],
+                            )
+                        )
+                        return
+
+                    # Normalize data
+                    normalized_data = normalize_social_post_data(post_data, social_platform)
+                    print(f"[DEBUG] Normalized data: {normalized_data}")
+
+                    # Generate AI summary
+                    summary = summarize_social_post(normalized_data, social_platform)
+                    parsed = parse_social_summary_response(summary)
+
+                    # Build response message
+                    platform_emoji = "📘" if social_platform == "facebook" else "🧵"
+                    platform_name = "Facebook" if social_platform == "facebook" else "Threads"
+
+                    response_text = f"{platform_emoji} {platform_name} 貼文分析\n{url}\n\n{summary}"
+
+                    line_bot_api.reply_message_with_http_info(
+                        ReplyMessageRequest(
+                            reply_token=event.reply_token,
+                            messages=[TextMessage(text=response_text)],
+                        )
+                    )
+                    print(f"[DEBUG] Social post analysis sent successfully")
+
+                    # Save to Notion
+                    save_social_to_notion(
+                        platform=platform_name,
+                        username=normalized_data.get("username", "未知"),
+                        summary=parsed.get("summary", ""),
+                        original_text=normalized_data.get("text", ""),
+                        keywords=parsed.get("keywords", []),
+                        likes=normalized_data.get("likes", 0),
+                        comments=normalized_data.get("comments", 0),
+                        shares=normalized_data.get("shares", 0),
+                        source_url=url,
+                        post_type=parsed.get("post_type", "其他"),
+                        user_id=user_id
+                    )
+                    return
+
+                # Priority 2: Check if it's a Google Maps URL
                 is_google_maps = any(pattern in url.lower() for pattern in [
                     'maps.google.com', 'google.com/maps', 'goo.gl/maps',
                     'maps.app.goo.gl', '/maps/', 'maps.app'
@@ -818,6 +1144,7 @@ def handle_text_message(event):
                     print(f"[DEBUG] Maps content length: {len(content)}")
                     summary = summarize_google_maps(content, url)
                 else:
+                    # Priority 3: General webpage
                     print(f"[DEBUG] Fetching webpage content...")
                     content = fetch_webpage_content(url)
                     print(f"[DEBUG] Content length: {len(content)}")
