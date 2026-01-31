@@ -1213,11 +1213,11 @@ def handle_text_message(event):
                     )
                     return
 
-                # Send initial response
+                # Send initial response with clear wait time expectation
                 line_bot_api.reply_message_with_http_info(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
-                        messages=[TextMessage(text=f"🔄 正在爬取 {max_posts} 篇貼文，請稍候...\n\n（這可能需要一些時間）")],
+                        messages=[TextMessage(text=f"🔄 開始爬取 {max_posts} 篇貼文\n\n⏱️ 預計需要 2-5 分鐘\n📱 完成後會自動通知你\n\n請耐心等候，不需要重複發送...")],
                     )
                 )
 
@@ -1307,7 +1307,7 @@ def handle_text_message(event):
             line_bot_api.reply_message_with_http_info(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
-                    messages=[TextMessage(text=f"🔄 正在爬取 {max_posts} 篇貼文，請稍候...")],
+                    messages=[TextMessage(text=f"🔄 開始爬取 {max_posts} 篇貼文\n\n⏱️ 預計需要 2-5 分鐘\n📱 完成後會自動通知你\n\n請耐心等候，不需要重複發送...")],
                 )
             )
 

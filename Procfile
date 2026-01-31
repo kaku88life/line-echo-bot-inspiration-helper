@@ -1,1 +1,1 @@
-web: gunicorn main:app --bind 0.0.0.0:$PORT --timeout 300 --workers 2
+web: gunicorn main:app --bind 0.0.0.0:$PORT --timeout 300 --worker-class gevent --workers 2
