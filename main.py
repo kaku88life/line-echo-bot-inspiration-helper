@@ -331,7 +331,7 @@ def setup_notion_social_database():
             database_id=NOTION_SOCIAL_DATABASE_ID,
             title=[{"text": {"content": "社群分析"}}],
             properties={
-                "標題": {"title": {}},
+                "名稱": {"title": {}},
                 "平台": {
                     "select": {
                         "options": [
@@ -551,7 +551,7 @@ def save_social_to_notion(
         title = f"[{platform}] {username}: {summary[:50]}..." if len(summary) > 50 else f"[{platform}] {username}: {summary}"
 
         properties = {
-            "標題": {"title": [{"text": {"content": title[:100]}}]},
+            "名稱": {"title": [{"text": {"content": title[:100]}}]},
             "平台": {"select": {"name": platform}},
             "帳號": {"rich_text": [{"text": {"content": username[:100]}}]},
             "內容摘要": {"rich_text": [{"text": {"content": summary[:2000]}}]},
