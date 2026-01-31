@@ -142,9 +142,9 @@ THREADS_PATTERN = re.compile(
     r'https?://(?:www\.)?threads\.net/@[\w.]+/post/[\w]+'
 )
 
-# Command pattern for multi-post scraping: "爬 5 篇 [URL]" or "爬取 10 篇 [URL]"
+# Command pattern for multi-post scraping: "爬 5 篇 [URL]" or "幫我爬 10 篇 [URL]"
 SCRAPE_MULTI_PATTERN = re.compile(
-    r'^爬取?\s*(\d+)\s*篇\s*(https?://\S+)',
+    r'^(?:幫我)?爬取?\s*(\d+)\s*篇\s*(https?://\S+)',
     re.IGNORECASE
 )
 
@@ -375,21 +375,58 @@ def setup_notion_social_database():
 
 def normalize_social_post_data(post_data: dict, platform: str) -> dict:
     """Normalize post data from different platforms to a common format"""
+    print(f"[DEBUG] Raw post data: {post_data}")
+
     if platform == "facebook":
+        # Try various field names from Apify Facebook scraper
+        username = (
+            post_data.get("pageName") or
+            post_data.get("userName") or
+            post_data.get("user", {}).get("name") if isinstance(post_data.get("user"), dict) else None or
+            post_data.get("name") or
+            "未知"
+        )
+        text = (
+            post_data.get("text") or
+            post_data.get("postText") or
+            post_data.get("message") or
+            post_data.get("description") or
+            ""
+        )
+        # Handle various reaction/like field names
+        likes = (
+            post_data.get("likes") or
+            post_data.get("likesCount") or
+            post_data.get("reactionsCount") or
+            post_data.get("reactions", {}).get("count") if isinstance(post_data.get("reactions"), dict) else 0 or
+            0
+        )
+        comments = (
+            post_data.get("comments") or
+            post_data.get("commentsCount") or
+            post_data.get("commentCount") or
+            0
+        )
+        shares = (
+            post_data.get("shares") or
+            post_data.get("sharesCount") or
+            post_data.get("shareCount") or
+            0
+        )
         return {
-            "username": post_data.get("pageName") or post_data.get("user", {}).get("name") or "未知",
-            "text": post_data.get("text") or post_data.get("postText") or "",
-            "likes": post_data.get("likes") or post_data.get("likesCount") or 0,
-            "comments": post_data.get("comments") or post_data.get("commentsCount") or 0,
-            "shares": post_data.get("shares") or post_data.get("sharesCount") or 0,
+            "username": username,
+            "text": text,
+            "likes": int(likes) if likes else 0,
+            "comments": int(comments) if comments else 0,
+            "shares": int(shares) if shares else 0,
         }
     elif platform == "threads":
         return {
             "username": post_data.get("ownerUsername") or post_data.get("author", {}).get("username") or "未知",
             "text": post_data.get("text") or post_data.get("caption") or "",
-            "likes": post_data.get("likeCount") or post_data.get("likesCount") or 0,
-            "comments": post_data.get("replyCount") or post_data.get("commentsCount") or 0,
-            "shares": post_data.get("repostCount") or 0,
+            "likes": int(post_data.get("likeCount") or post_data.get("likesCount") or 0),
+            "comments": int(post_data.get("replyCount") or post_data.get("commentsCount") or 0),
+            "shares": int(post_data.get("repostCount") or 0),
         }
     return {
         "username": "未知",
@@ -1145,6 +1182,101 @@ def handle_text_message(event):
                 )
             return
 
+        # Check if user is in scrape_waiting_count mode (waiting for post count)
+        if user_id in user_states and user_states[user_id].get("mode") == "scrape_waiting_count":
+            state = user_states[user_id]
+            url = state.get("url")
+            platform = state.get("platform")
+
+            # Check for cancel
+            if text in ["取消", "離開", "結束", "exit", "cancel"]:
+                del user_states[user_id]
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text="已取消爬取 👋")],
+                    )
+                )
+                return
+
+            # Check if input is a number
+            if text.isdigit():
+                max_posts = min(int(text), 20)  # Cap at 20
+                del user_states[user_id]  # Clear state
+
+                if not apify_client:
+                    line_bot_api.reply_message_with_http_info(
+                        ReplyMessageRequest(
+                            reply_token=event.reply_token,
+                            messages=[TextMessage(text="❌ 社群爬蟲功能未設定，請設定 APIFY_API_KEY")],
+                        )
+                    )
+                    return
+
+                # Send initial response
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=f"🔄 正在爬取 {max_posts} 篇貼文，請稍候...\n\n（這可能需要一些時間）")],
+                    )
+                )
+
+                # Scrape multiple posts
+                posts = scrape_facebook_post(url, max_posts) if platform == "facebook" else scrape_threads_post(url, max_posts)
+
+                if not posts:
+                    with ApiClient(configuration) as api_client2:
+                        messaging_api2 = MessagingApi(api_client2)
+                        messaging_api2.push_message(
+                            PushMessageRequest(
+                                to=user_id,
+                                messages=[TextMessage(text=f"❌ 無法爬取貼文，可能是私人帳號或網址無效")]
+                            )
+                        )
+                    return
+
+                # Process each post
+                platform_name = "Facebook" if platform == "facebook" else "Threads"
+                saved_count = 0
+
+                for i, post_data in enumerate(posts):
+                    try:
+                        print(f"[DEBUG] Processing post {i+1}, raw data keys: {post_data.keys()}")
+                        normalized_data = normalize_social_post_data(post_data, platform)
+                        print(f"[DEBUG] Normalized: likes={normalized_data.get('likes')}, comments={normalized_data.get('comments')}")
+                        summary = summarize_social_post(normalized_data, platform)
+                        parsed = parse_social_summary_response(summary)
+
+                        post_url = post_data.get("url") or post_data.get("postUrl") or url
+
+                        if save_social_to_notion(
+                            platform=platform_name,
+                            username=normalized_data.get("username", "未知"),
+                            summary=parsed.get("summary", ""),
+                            original_text=normalized_data.get("text", ""),
+                            keywords=parsed.get("keywords", []),
+                            likes=normalized_data.get("likes", 0),
+                            comments=normalized_data.get("comments", 0),
+                            shares=normalized_data.get("shares", 0),
+                            source_url=post_url,
+                            post_type=parsed.get("post_type", "其他"),
+                            user_id=user_id
+                        ):
+                            saved_count += 1
+                    except Exception as e:
+                        print(f"[DEBUG] Error processing post {i+1}: {str(e)}")
+
+                # Send completion message
+                with ApiClient(configuration) as api_client2:
+                    messaging_api2 = MessagingApi(api_client2)
+                    messaging_api2.push_message(
+                        PushMessageRequest(
+                            to=user_id,
+                            messages=[TextMessage(text=f"✅ 完成！已爬取 {len(posts)} 篇貼文，成功存入 Notion {saved_count} 篇")]
+                        )
+                    )
+                return
+
         # Check for multi-post scraping command: "爬 5 篇 [URL]"
         multi_match = SCRAPE_MULTI_PATTERN.match(text)
         if multi_match:
@@ -1263,15 +1395,24 @@ def handle_text_message(event):
 
                     # If it's a page URL, ask user how many posts to scrape
                     if url_type == "page":
+                        # Store state for waiting scrape count
+                        user_states[user_id] = {
+                            "mode": "scrape_waiting_count",
+                            "url": url,
+                            "platform": platform,
+                            "entered_at": time.time()
+                        }
                         line_bot_api.reply_message_with_http_info(
                             ReplyMessageRequest(
                                 reply_token=event.reply_token,
                                 messages=[TextMessage(
-                                    text=f"📘 偵測到 Facebook 粉專/個人頁面\n\n請問要爬取幾篇貼文？\n\n請輸入：爬 [數量] 篇 {url}\n例如：爬 5 篇 {url}",
+                                    text=f"📘 偵測到 Facebook 粉專/個人頁面\n\n請選擇要爬取幾篇貼文：",
                                     quick_reply=QuickReply(items=[
-                                        QuickReplyItem(action=MessageAction(label="爬 3 篇", text=f"爬 3 篇 {url}")),
-                                        QuickReplyItem(action=MessageAction(label="爬 5 篇", text=f"爬 5 篇 {url}")),
-                                        QuickReplyItem(action=MessageAction(label="爬 10 篇", text=f"爬 10 篇 {url}")),
+                                        QuickReplyItem(action=MessageAction(label="3 篇", text="3")),
+                                        QuickReplyItem(action=MessageAction(label="5 篇", text="5")),
+                                        QuickReplyItem(action=MessageAction(label="10 篇", text="10")),
+                                        QuickReplyItem(action=MessageAction(label="20 篇", text="20")),
+                                        QuickReplyItem(action=MessageAction(label="❌ 取消", text="取消")),
                                     ])
                                 )],
                             )
