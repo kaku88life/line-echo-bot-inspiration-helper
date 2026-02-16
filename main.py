@@ -379,10 +379,11 @@ def normalize_social_post_data(post_data: dict, platform: str) -> dict:
 
     if platform == "facebook":
         # Try various field names from Apify Facebook scraper
+        user_dict = post_data.get("user") if isinstance(post_data.get("user"), dict) else {}
         username = (
             post_data.get("pageName") or
             post_data.get("userName") or
-            post_data.get("user", {}).get("name") if isinstance(post_data.get("user"), dict) else None or
+            user_dict.get("name") or
             post_data.get("name") or
             "未知"
         )
@@ -394,11 +395,12 @@ def normalize_social_post_data(post_data: dict, platform: str) -> dict:
             ""
         )
         # Handle various reaction/like field names
+        reactions_dict = post_data.get("reactions") if isinstance(post_data.get("reactions"), dict) else {}
         likes = (
             post_data.get("likes") or
             post_data.get("likesCount") or
             post_data.get("reactionsCount") or
-            post_data.get("reactions", {}).get("count") if isinstance(post_data.get("reactions"), dict) else 0 or
+            reactions_dict.get("count") or
             0
         )
         comments = (
