@@ -304,10 +304,9 @@ def scrape_threads_post(url: str, max_posts: int = 1) -> list[dict]:
     try:
         print(f"[DEBUG] Scraping Threads post: {url}")
         run_input = {
-            "postUrls": [url],
-            "maxItems": max_posts,
+            "url": url,
         }
-        run = apify_client.actor("apify/threads-scraper").call(run_input=run_input)
+        run = apify_client.actor("sinam7/threads-post-scraper").call(run_input=run_input)
         items = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
         if items:
             print(f"[DEBUG] Threads scrape successful, got {len(items)} posts")
@@ -317,6 +316,110 @@ def scrape_threads_post(url: str, max_posts: int = 1) -> list[dict]:
     except Exception as e:
         print(f"[DEBUG] Threads scrape error: {str(e)}")
         return []
+
+
+def scrape_google_maps(url: str) -> dict | None:
+    """Scrape Google Maps place data using Apify
+
+    Args:
+        url: Google Maps URL
+
+    Returns:
+        Place data dictionary or None
+    """
+    if not apify_client:
+        print("[DEBUG] Apify client not configured for Google Maps scraping")
+        return None
+
+    try:
+        print(f"[DEBUG] Scraping Google Maps URL: {url}")
+        run_input = {
+            "startUrls": [{"url": url}],
+        }
+        run = apify_client.actor("blueorion/free-google-maps-scraper-extensive").call(run_input=run_input)
+        items = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
+        if items:
+            print(f"[DEBUG] Google Maps scrape successful, got {len(items)} places")
+            return items[0]
+        print("[DEBUG] No items returned from Google Maps scraper")
+        return None
+    except Exception as e:
+        print(f"[DEBUG] Google Maps scrape error: {str(e)}")
+        return None
+
+
+def format_google_maps_result(place: dict) -> str:
+    """Format scraped Google Maps place data into a readable summary"""
+    lines = []
+
+    name = place.get("title") or place.get("name") or "未知地點"
+    lines.append(f"📍 地點名稱：{name}")
+
+    # Category / type
+    category = place.get("categoryName") or place.get("category") or ""
+    if category:
+        lines.append(f"🏷️ 類型：{category}")
+
+    # Address
+    address = place.get("address") or place.get("street") or ""
+    if address:
+        lines.append(f"📮 地址：{address}")
+
+    # Rating
+    rating = place.get("totalScore") or place.get("rating") or place.get("stars")
+    reviews_count = place.get("reviewsCount") or place.get("reviews") or 0
+    if rating:
+        lines.append(f"⭐ 評分：{rating}/5（{reviews_count} 則評論）")
+
+    # Phone
+    phone = place.get("phone") or place.get("phoneUnformatted") or ""
+    if phone:
+        lines.append(f"📞 電話：{phone}")
+
+    # Website
+    website = place.get("website") or place.get("url") or ""
+    if website:
+        lines.append(f"🌐 網站：{website}")
+
+    # Price level
+    price = place.get("price") or place.get("priceLevel") or ""
+    if price:
+        lines.append(f"💰 價位：{price}")
+
+    # Opening hours
+    hours = place.get("openingHours")
+    if hours:
+        if isinstance(hours, list):
+            lines.append("🕐 營業時間：")
+            for h in hours[:7]:
+                if isinstance(h, dict):
+                    day = h.get("day", "")
+                    time_str = h.get("hours", "")
+                    lines.append(f"  • {day}：{time_str}")
+                elif isinstance(h, str):
+                    lines.append(f"  • {h}")
+        elif isinstance(hours, str):
+            lines.append(f"🕐 營業時間：{hours}")
+
+    # Description
+    description = place.get("description") or ""
+    if description:
+        lines.append(f"\n📝 簡介：{description}")
+
+    # Location coordinates
+    lat = place.get("location", {}).get("lat") or place.get("latitude")
+    lng = place.get("location", {}).get("lng") or place.get("longitude")
+    if lat and lng:
+        lines.append(f"🗺️ 座標：{lat}, {lng}")
+
+    # Additional info
+    additional = place.get("additionalInfo") or place.get("additionalCategories")
+    if additional and isinstance(additional, dict):
+        for key, value in list(additional.items())[:5]:
+            if value:
+                lines.append(f"ℹ️ {key}：{value}")
+
+    return "\n".join(lines)
 
 
 def setup_notion_social_database():
@@ -1480,10 +1583,18 @@ def handle_text_message(event):
                 ])
 
                 if is_google_maps:
-                    print(f"[DEBUG] Detected Google Maps URL, fetching location info...")
-                    content = fetch_webpage_content(url)
-                    print(f"[DEBUG] Maps content length: {len(content)}")
-                    summary = summarize_google_maps(content, url)
+                    print(f"[DEBUG] Detected Google Maps URL, trying Apify scraper first...")
+                    place_data = scrape_google_maps(url)
+                    if place_data:
+                        scraped_info = format_google_maps_result(place_data)
+                        # Use OpenAI to enhance the scraped data with analysis
+                        summary = summarize_google_maps(scraped_info, url)
+                    else:
+                        # Fallback to webpage scraping
+                        print(f"[DEBUG] Apify scraper failed, falling back to webpage fetch...")
+                        content = fetch_webpage_content(url)
+                        print(f"[DEBUG] Maps content length: {len(content)}")
+                        summary = summarize_google_maps(content, url)
                 else:
                     # Priority 3: General webpage
                     print(f"[DEBUG] Fetching webpage content...")

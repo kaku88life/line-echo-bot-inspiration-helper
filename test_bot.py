@@ -837,6 +837,130 @@ class TestApifyScraping:
 
         main.apify_client = original_client
 
+    def test_scrape_google_maps_without_apify(self):
+        """Apify 未設定時應回傳 None"""
+        original_client = main.apify_client
+        main.apify_client = None
+
+        result = main.scrape_google_maps("https://maps.google.com/place/test")
+        assert result is None
+
+        main.apify_client = original_client
+
+
+# ============================================================
+# 14.5 Google Maps 格式化測試
+# ============================================================
+
+class TestFormatGoogleMapsResult:
+    """測試 Google Maps 爬蟲結果格式化"""
+
+    def test_format_full_place_data(self):
+        """完整地點資料格式化"""
+        place = {
+            "title": "東京拉麵店",
+            "categoryName": "拉麵店",
+            "address": "東京都新宿區1-2-3",
+            "totalScore": 4.5,
+            "reviewsCount": 120,
+            "phone": "+81-3-1234-5678",
+            "website": "https://ramen.example.com",
+            "price": "$$",
+        }
+        result = main.format_google_maps_result(place)
+        assert "東京拉麵店" in result
+        assert "拉麵店" in result
+        assert "東京都新宿區1-2-3" in result
+        assert "4.5" in result
+        assert "120" in result
+        assert "+81-3-1234-5678" in result
+        assert "https://ramen.example.com" in result
+        assert "$$" in result
+
+    def test_format_minimal_place_data(self):
+        """最少資料的地點格式化"""
+        place = {
+            "title": "某地點",
+        }
+        result = main.format_google_maps_result(place)
+        assert "某地點" in result
+        assert "📍" in result
+
+    def test_format_with_name_field(self):
+        """使用 name 欄位而非 title"""
+        place = {
+            "name": "備用名稱店",
+        }
+        result = main.format_google_maps_result(place)
+        assert "備用名稱店" in result
+
+    def test_format_with_opening_hours_list(self):
+        """營業時間為列表格式"""
+        place = {
+            "title": "Test Place",
+            "openingHours": [
+                {"day": "Monday", "hours": "9:00-21:00"},
+                {"day": "Tuesday", "hours": "9:00-21:00"},
+            ],
+        }
+        result = main.format_google_maps_result(place)
+        assert "Monday" in result
+        assert "9:00-21:00" in result
+
+    def test_format_with_opening_hours_string_list(self):
+        """營業時間為字串列表格式"""
+        place = {
+            "title": "Test Place",
+            "openingHours": ["Mon: 9-21", "Tue: 9-21"],
+        }
+        result = main.format_google_maps_result(place)
+        assert "Mon: 9-21" in result
+
+    def test_format_with_opening_hours_string(self):
+        """營業時間為單一字串"""
+        place = {
+            "title": "Test Place",
+            "openingHours": "Mon-Fri 9:00-21:00",
+        }
+        result = main.format_google_maps_result(place)
+        assert "Mon-Fri 9:00-21:00" in result
+
+    def test_format_with_coordinates(self):
+        """包含座標資訊"""
+        place = {
+            "title": "Test Place",
+            "location": {"lat": 35.6762, "lng": 139.6503},
+        }
+        result = main.format_google_maps_result(place)
+        assert "35.6762" in result
+        assert "139.6503" in result
+
+    def test_format_with_description(self):
+        """包含簡介"""
+        place = {
+            "title": "Test Place",
+            "description": "一家很棒的餐廳",
+        }
+        result = main.format_google_maps_result(place)
+        assert "一家很棒的餐廳" in result
+
+    def test_format_empty_place(self):
+        """空資料應回傳未知地點"""
+        place = {}
+        result = main.format_google_maps_result(place)
+        assert "未知地點" in result
+
+    def test_format_with_rating_field(self):
+        """使用 rating 欄位而非 totalScore"""
+        place = {
+            "title": "Test",
+            "rating": 4.2,
+            "reviews": 50,
+        }
+        result = main.format_google_maps_result(place)
+        assert "4.2" in result
+        assert "50" in result
+
 
 # ============================================================
 # 15. 常數與設定測試
