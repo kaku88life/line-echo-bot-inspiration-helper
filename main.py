@@ -138,8 +138,11 @@ FACEBOOK_POST_PATTERN = re.compile(
 FACEBOOK_PAGE_PATTERN = re.compile(
     r'https?://(?:www\.|m\.|web\.)?facebook\.com/([\w.]+)/?(?:\?.*)?$'
 )
-THREADS_PATTERN = re.compile(
-    r'https?://(?:www\.)?threads\.net/@[\w.]+/post/[\w]+'
+THREADS_POST_PATTERN = re.compile(
+    r'https?://(?:www\.)?threads\.(?:net|com)/@[\w.]+/post/[\w]+(?:\?.*)?'
+)
+THREADS_PROFILE_PATTERN = re.compile(
+    r'https?://(?:www\.)?threads\.(?:net|com)/@[\w.]+/?(?:\?.*)?$'
 )
 
 # Command pattern for multi-post scraping: "爬 5 篇 [URL]" or "幫我爬 10 篇 [URL]"
@@ -234,6 +237,20 @@ LANGUAGE_MAP = {
 }
 
 
+def resolve_short_url(url: str) -> str:
+    """Resolve a shortened URL to its final destination URL.
+    Returns the original URL if resolution fails."""
+    try:
+        response = requests.head(url, allow_redirects=True, timeout=10)
+        final_url = response.url
+        if final_url and final_url != url:
+            print(f"[DEBUG] Resolved short URL: {url} -> {final_url}")
+            return final_url
+    except Exception as e:
+        print(f"[DEBUG] Failed to resolve short URL: {str(e)}")
+    return url
+
+
 def extract_url(text: str) -> str | None:
     """Extract the first URL from text"""
     match = URL_PATTERN.search(text)
@@ -250,8 +267,10 @@ def detect_social_platform(url: str) -> tuple[str | None, str]:
         return ("facebook", "post")
     if FACEBOOK_PAGE_PATTERN.match(url):
         return ("facebook", "page")
-    if THREADS_PATTERN.match(url):
+    if THREADS_POST_PATTERN.match(url):
         return ("threads", "post")
+    if THREADS_PROFILE_PATTERN.match(url):
+        return ("threads", "page")
     return (None, "")
 
 
@@ -1507,11 +1526,13 @@ def handle_text_message(event):
                             "platform": platform,
                             "entered_at": time.time()
                         }
+                        platform_emoji = "📘" if platform == "facebook" else "🧵"
+                        platform_label = "Facebook 粉專/個人頁面" if platform == "facebook" else "Threads 個人頁面"
                         line_bot_api.reply_message_with_http_info(
                             ReplyMessageRequest(
                                 reply_token=event.reply_token,
                                 messages=[TextMessage(
-                                    text=f"📘 偵測到 Facebook 粉專/個人頁面\n\n請選擇要爬取幾篇貼文：",
+                                    text=f"{platform_emoji} 偵測到 {platform_label}\n\n請選擇要爬取幾篇貼文：",
                                     quick_reply=QuickReply(items=[
                                         QuickReplyItem(action=MessageAction(label="3 篇", text="3")),
                                         QuickReplyItem(action=MessageAction(label="5 篇", text="5")),
@@ -1584,17 +1605,19 @@ def handle_text_message(event):
 
                 if is_google_maps:
                     print(f"[DEBUG] Detected Google Maps URL, trying Apify scraper first...")
-                    place_data = scrape_google_maps(url)
+                    # Resolve short URLs (e.g., maps.app.goo.gl/xxx -> full Google Maps URL)
+                    resolved_url = resolve_short_url(url)
+                    place_data = scrape_google_maps(resolved_url)
                     if place_data:
                         scraped_info = format_google_maps_result(place_data)
                         # Use OpenAI to enhance the scraped data with analysis
-                        summary = summarize_google_maps(scraped_info, url)
+                        summary = summarize_google_maps(scraped_info, resolved_url)
                     else:
-                        # Fallback to webpage scraping
+                        # Fallback to webpage scraping with resolved URL
                         print(f"[DEBUG] Apify scraper failed, falling back to webpage fetch...")
-                        content = fetch_webpage_content(url)
+                        content = fetch_webpage_content(resolved_url)
                         print(f"[DEBUG] Maps content length: {len(content)}")
-                        summary = summarize_google_maps(content, url)
+                        summary = summarize_google_maps(content, resolved_url)
                 else:
                     # Priority 3: General webpage
                     print(f"[DEBUG] Fetching webpage content...")

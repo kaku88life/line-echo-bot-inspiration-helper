@@ -105,6 +105,26 @@ class TestDetectSocialPlatform:
         assert platform == "threads"
         assert url_type == "post"
 
+    def test_threads_com_post_url(self):
+        """threads.com 域名的貼文"""
+        url = "https://www.threads.com/@chiongyjdpp/post/DU2oUjaEynj?xmt=AQF0rvrP"
+        platform, url_type = main.detect_social_platform(url)
+        assert platform == "threads"
+        assert url_type == "post"
+
+    def test_threads_profile_url(self):
+        """Threads 個人頁面應被偵測為 page"""
+        url = "https://www.threads.com/@kaku_88life"
+        platform, url_type = main.detect_social_platform(url)
+        assert platform == "threads"
+        assert url_type == "page"
+
+    def test_threads_net_profile_url(self):
+        url = "https://www.threads.net/@someuser"
+        platform, url_type = main.detect_social_platform(url)
+        assert platform == "threads"
+        assert url_type == "page"
+
     # Non-social URLs
     def test_non_social_url(self):
         url = "https://www.google.com"
@@ -522,9 +542,33 @@ class TestRegexPatterns:
         for url in urls:
             assert main.FACEBOOK_PAGE_PATTERN.match(url) is not None, f"Failed for: {url}"
 
-    def test_threads_pattern(self):
+    def test_threads_post_pattern(self):
         url = "https://www.threads.net/@username/post/ABC123xyz"
-        assert main.THREADS_PATTERN.match(url) is not None
+        assert main.THREADS_POST_PATTERN.match(url) is not None
+
+    def test_threads_post_pattern_com_domain(self):
+        """threads.com 域名也應該匹配"""
+        url = "https://www.threads.com/@username/post/ABC123xyz"
+        assert main.THREADS_POST_PATTERN.match(url) is not None
+
+    def test_threads_post_pattern_with_query_params(self):
+        """帶 query params 的 Threads URL 應該匹配"""
+        url = "https://www.threads.com/@chiongyjdpp/post/DU2oUjaEynj?xmt=AQF0rvrPjWqAbBJIGjET1wW1"
+        assert main.THREADS_POST_PATTERN.match(url) is not None
+
+    def test_threads_profile_pattern(self):
+        """Threads 個人頁面應該匹配"""
+        url = "https://www.threads.com/@kaku_88life"
+        assert main.THREADS_PROFILE_PATTERN.match(url) is not None
+
+    def test_threads_profile_pattern_net(self):
+        url = "https://www.threads.net/@kaku_88life"
+        assert main.THREADS_PROFILE_PATTERN.match(url) is not None
+
+    def test_threads_profile_not_match_post(self):
+        """貼文 URL 不應該被 profile pattern 匹配"""
+        url = "https://www.threads.com/@username/post/ABC123"
+        assert main.THREADS_PROFILE_PATTERN.match(url) is None
 
 
 # ============================================================
@@ -633,6 +677,41 @@ class TestFlaskRoutes:
             headers={"X-Line-Signature": "invalid"}
         )
         assert response.status_code == 400
+
+
+# ============================================================
+# 10.5 短網址解析測試
+# ============================================================
+
+class TestResolveShortUrl:
+    """測試短網址解析"""
+
+    @patch("main.requests.head")
+    def test_resolve_redirect(self, mock_head):
+        """短網址應被解析為完整 URL"""
+        mock_response = MagicMock()
+        mock_response.url = "https://www.google.com/maps/place/Tokyo+Tower"
+        mock_head.return_value = mock_response
+
+        result = main.resolve_short_url("https://maps.app.goo.gl/abc123")
+        assert result == "https://www.google.com/maps/place/Tokyo+Tower"
+
+    @patch("main.requests.head")
+    def test_no_redirect(self, mock_head):
+        """沒有重定向時回傳原始 URL"""
+        mock_response = MagicMock()
+        mock_response.url = "https://maps.app.goo.gl/abc123"
+        mock_head.return_value = mock_response
+
+        result = main.resolve_short_url("https://maps.app.goo.gl/abc123")
+        assert result == "https://maps.app.goo.gl/abc123"
+
+    @patch("main.requests.head")
+    def test_resolve_failure(self, mock_head):
+        """解析失敗時回傳原始 URL"""
+        mock_head.side_effect = Exception("Timeout")
+        result = main.resolve_short_url("https://maps.app.goo.gl/abc123")
+        assert result == "https://maps.app.goo.gl/abc123"
 
 
 # ============================================================
