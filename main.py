@@ -3,6 +3,7 @@ import re
 import tempfile
 import time
 import threading
+import base64
 from flask import Flask, request, abort
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -27,7 +28,7 @@ from linebot.v3.messaging import (
     QuickReplyItem,
     MessageAction,
 )
-from linebot.v3.webhooks import MessageEvent, TextMessageContent, AudioMessageContent
+from linebot.v3.webhooks import MessageEvent, TextMessageContent, AudioMessageContent, ImageMessageContent
 
 load_dotenv()
 
@@ -338,10 +339,10 @@ def scrape_threads_post(url: str, max_posts: int = 1) -> list[dict]:
 
 
 def scrape_google_maps(url: str) -> dict | None:
-    """Scrape Google Maps place data using Apify
+    """Scrape Google Maps place data using Apify (compass/crawler-google-places)
 
     Args:
-        url: Google Maps URL
+        url: Google Maps URL (resolved, not shortened)
 
     Returns:
         Place data dictionary or None
@@ -354,8 +355,10 @@ def scrape_google_maps(url: str) -> dict | None:
         print(f"[DEBUG] Scraping Google Maps URL: {url}")
         run_input = {
             "startUrls": [{"url": url}],
+            "maxCrawledPlacesPerSearch": 1,
+            "language": "zh-TW",
         }
-        run = apify_client.actor("blueorion/free-google-maps-scraper-extensive").call(run_input=run_input)
+        run = apify_client.actor("compass/crawler-google-places").call(run_input=run_input)
         items = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
         if items:
             print(f"[DEBUG] Google Maps scrape successful, got {len(items)} places")
@@ -485,6 +488,8 @@ def setup_notion_social_database():
                     }
                 },
                 "LINE 用戶": {"rich_text": {}},
+                "圖片": {"rich_text": {}},
+                "圖片文字": {"rich_text": {}},
                 "建立時間": {"created_time": {}},
             }
         )
@@ -537,20 +542,63 @@ def normalize_social_post_data(post_data: dict, platform: str) -> dict:
             post_data.get("shareCount") or
             0
         )
+        # Extract images from media array
+        images = []
+        image_text = ""
+        media_list = post_data.get("media") or []
+        for media_item in media_list:
+            if isinstance(media_item, dict):
+                # Try photo_image.uri first, then thumbnail
+                photo_image = media_item.get("photo_image", {})
+                img_url = photo_image.get("uri") if isinstance(photo_image, dict) else None
+                if not img_url:
+                    img_url = media_item.get("thumbnail") or media_item.get("url")
+                if img_url:
+                    images.append(img_url)
+                # Collect OCR text
+                ocr = media_item.get("ocrText") or ""
+                if ocr:
+                    image_text += ocr + "\n"
         return {
             "username": username,
             "text": text,
             "likes": int(likes) if likes else 0,
             "comments": int(comments) if comments else 0,
             "shares": int(shares) if shares else 0,
+            "images": images,
+            "image_text": image_text.strip(),
         }
     elif platform == "threads":
+        # Support both old (ownerUsername/text) and new (authorId/content) field names
+        author_id = post_data.get("authorId", "")
+        # authorId often comes as "/@username", strip leading /@
+        if isinstance(author_id, str):
+            author_id = author_id.lstrip("/@")
+        username = (
+            post_data.get("ownerUsername") or
+            post_data.get("author", {}).get("username") or
+            post_data.get("authorName") or
+            author_id or
+            "未知"
+        )
+        text = (
+            post_data.get("text") or
+            post_data.get("caption") or
+            post_data.get("content") or
+            ""
+        )
+        # Extract images
+        images = post_data.get("images") or []
+        # Ensure images is a list of strings
+        images = [img for img in images if isinstance(img, str)]
         return {
-            "username": post_data.get("ownerUsername") or post_data.get("author", {}).get("username") or "未知",
-            "text": post_data.get("text") or post_data.get("caption") or "",
+            "username": username,
+            "text": text,
             "likes": int(post_data.get("likeCount") or post_data.get("likesCount") or 0),
             "comments": int(post_data.get("replyCount") or post_data.get("commentsCount") or 0),
             "shares": int(post_data.get("repostCount") or 0),
+            "images": images,
+            "image_text": "",
         }
     return {
         "username": "未知",
@@ -558,6 +606,8 @@ def normalize_social_post_data(post_data: dict, platform: str) -> dict:
         "likes": 0,
         "comments": 0,
         "shares": 0,
+        "images": [],
+        "image_text": "",
     }
 
 
@@ -569,9 +619,18 @@ def summarize_social_post(post_data: dict, platform: str) -> str:
     platform_name = "Facebook" if platform == "facebook" else "Threads"
 
     try:
+        # Build image context if available
+        image_context = ""
+        image_text = post_data.get('image_text', '')
+        images = post_data.get('images', [])
+        if image_text:
+            image_context += f"\n圖片中的文字（OCR）：{image_text}"
+        if images:
+            image_context += f"\n附圖數量：{len(images)} 張"
+
         prompt = f"""分析以下 {platform_name} 貼文：
 帳號：{post_data.get('username', '未知')}
-內容：{post_data.get('text', '')}
+內容：{post_data.get('text', '')}{image_context}
 互動數據：{post_data.get('likes', 0)} 讚、{post_data.get('comments', 0)} 留言、{post_data.get('shares', 0)} 分享
 
 請用以下格式回覆（繁體中文）：
@@ -640,7 +699,9 @@ def save_social_to_notion(
     shares: int,
     source_url: str,
     post_type: str = "其他",
-    user_id: str = None
+    user_id: str = None,
+    images: list[str] = None,
+    image_text: str = None
 ) -> bool:
     """Save social media post to Notion database
 
@@ -656,6 +717,8 @@ def save_social_to_notion(
         source_url: Original post URL
         post_type: Post type category
         user_id: LINE User ID
+        images: List of image URLs
+        image_text: OCR text from images
 
     Returns:
         True if saved successfully, False otherwise
@@ -702,6 +765,15 @@ def save_social_to_notion(
 
         if user_id:
             properties["LINE 用戶"] = {"rich_text": [{"text": {"content": user_id}}]}
+
+        # Add image URLs
+        if images:
+            image_urls_text = "\n".join(images[:5])  # Limit to 5 images
+            properties["圖片"] = {"rich_text": [{"text": {"content": image_urls_text[:2000]}}]}
+
+        # Add image OCR text
+        if image_text:
+            properties["圖片文字"] = {"rich_text": [{"text": {"content": image_text[:2000]}}]}
 
         # Create page in database
         notion_client.pages.create(
@@ -1221,18 +1293,46 @@ def handle_text_message(event):
                 return
             # If input doesn't match a language, treat it as content to translate with default
             # Or show error - let's show the language selection again
-            if text not in ["取消", "離開", "結束", "exit", "cancel"]:
-                # Check if it's a valid language name not in our quick reply but in the map
-                for lang_name, lang_code in LANGUAGE_MAP.items():
-                    if text == lang_name:
-                        user_states[user_id] = {"mode": "translate_waiting", "target_language": lang_code, "entered_at": time.time()}
-                        line_bot_api.reply_message_with_http_info(
-                            ReplyMessageRequest(
-                                reply_token=event.reply_token,
-                                messages=[TextMessage(text=f"✅ 已選擇翻譯成【{text}】\n\n請輸入要翻譯的內容：\n\n💡 輸入「取消」可離開翻譯模式")],
-                            )
+            if text in ["取消", "離開", "結束", "exit", "cancel"]:
+                del user_states[user_id]
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text="已離開翻譯模式 👋")],
+                    )
+                )
+                return
+
+            # Check if it's a valid language name not in our quick reply but in the map
+            for lang_name, lang_code in LANGUAGE_MAP.items():
+                if text == lang_name:
+                    user_states[user_id] = {"mode": "translate_waiting", "target_language": lang_code, "entered_at": time.time()}
+                    line_bot_api.reply_message_with_http_info(
+                        ReplyMessageRequest(
+                            reply_token=event.reply_token,
+                            messages=[TextMessage(text=f"✅ 已選擇翻譯成【{text}】\n\n請輸入要翻譯的內容：\n\n💡 輸入「取消」可離開翻譯模式")],
                         )
-                        return
+                    )
+                    return
+
+            # No matching language found - show error and re-display language selection
+            quick_reply_items = [
+                QuickReplyItem(action=MessageAction(label=label, text=label))
+                for label, _ in QUICK_REPLY_LANGUAGES
+            ]
+            quick_reply_items.append(
+                QuickReplyItem(action=MessageAction(label="❌ 取消", text="取消"))
+            )
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(
+                        text=f"❌ 找不到「{text}」這個語言\n\n請從下方選擇，或直接輸入語言名稱（如：韓文、馬來文）：",
+                        quick_reply=QuickReply(items=quick_reply_items)
+                    )],
+                )
+            )
+            return
 
         # Check if user wants to enter translation mode (just "翻譯" or "翻譯模式")
         if text in ["翻譯", "翻譯模式"]:
@@ -1384,7 +1484,9 @@ def handle_text_message(event):
                             shares=normalized_data.get("shares", 0),
                             source_url=post_url,
                             post_type=parsed.get("post_type", "其他"),
-                            user_id=user_id
+                            user_id=user_id,
+                            images=normalized_data.get("images", []),
+                            image_text=normalized_data.get("image_text", "")
                         ):
                             saved_count += 1
                     except Exception as e:
@@ -1478,7 +1580,9 @@ def handle_text_message(event):
                         shares=normalized_data.get("shares", 0),
                         source_url=post_url,
                         post_type=parsed.get("post_type", "其他"),
-                        user_id=user_id
+                        user_id=user_id,
+                        images=normalized_data.get("images", []),
+                        image_text=normalized_data.get("image_text", "")
                     ):
                         saved_count += 1
                         print(f"[DEBUG] Saved post {i+1}/{len(posts)}")
@@ -1593,7 +1697,9 @@ def handle_text_message(event):
                         shares=normalized_data.get("shares", 0),
                         source_url=url,
                         post_type=parsed.get("post_type", "其他"),
-                        user_id=user_id
+                        user_id=user_id,
+                        images=normalized_data.get("images", []),
+                        image_text=normalized_data.get("image_text", "")
                     )
                     return
 
@@ -1675,6 +1781,212 @@ def handle_text_message(event):
                         messages=[TextMessage(text=f"❌ 文字摘要失敗：{str(e)}")],
                     )
                 )
+
+
+def analyze_image(image_data: bytes) -> str:
+    """Use OpenAI GPT-4o-mini Vision to analyze an image
+
+    Args:
+        image_data: Raw image bytes
+
+    Returns:
+        Analysis result text
+    """
+    if not openai_client:
+        return "圖片分析功能未設定，請設定 OPENAI_API_KEY"
+
+    try:
+        # Encode image to base64
+        base64_image = base64.b64encode(image_data).decode("utf-8")
+
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是一個專業的圖片分析助手，擅長描述圖片內容、辨識文字（OCR）、分類圖片類型。請用繁體中文回覆。"
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": """請分析這張圖片，用以下格式回覆：
+
+🏷️ 分類：[只選一個：截圖、照片、美食、風景、人物、商品、文件、地圖、其他]
+
+📝 圖片描述：[2-3句話描述圖片內容]
+
+📖 圖片中的文字：[如果有文字，請完整列出；如果沒有文字，請寫「無」]
+
+🔑 關鍵字：[3-5個關鍵字，用頓號分隔]
+
+🎯 一句話總結：[用一句話總結圖片內容]"""
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}",
+                                "detail": "auto"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=1000,
+            temperature=0.5
+        )
+        return response.choices[0].message.content
+
+    except Exception as e:
+        return f"圖片分析失敗：{str(e)}"
+
+
+def translate_image_text(image_data: bytes, target_language: str) -> str:
+    """Use OpenAI GPT-4o-mini Vision to extract and translate text from an image
+
+    Args:
+        image_data: Raw image bytes
+        target_language: Target language for translation
+
+    Returns:
+        Translation result text
+    """
+    if not openai_client:
+        return "圖片翻譯功能未設定，請設定 OPENAI_API_KEY"
+
+    try:
+        base64_image = base64.b64encode(image_data).decode("utf-8")
+
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": f"你是一個專業的翻譯助手。請辨識圖片中的文字，並翻譯成{target_language}。"
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"請辨識這張圖片中的所有文字，並翻譯成{target_language}。請用以下格式回覆：\n\n📖 原始文字：\n[圖片中的原始文字]\n\n🌐 翻譯結果（{target_language}）：\n[翻譯後的文字]"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}",
+                                "detail": "auto"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=2000,
+            temperature=0.3
+        )
+        return response.choices[0].message.content
+
+    except Exception as e:
+        return f"圖片翻譯失敗：{str(e)}"
+
+
+@handler.add(MessageEvent, message=ImageMessageContent)
+def handle_image_message(event):
+    """Handle image messages - analyze with OpenAI Vision or translate text in image"""
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        blob_api = MessagingApiBlob(api_client)
+
+        user_id = event.source.user_id
+        print(f"[DEBUG] Received image message from user: {user_id}")
+
+        # Check if OpenAI is configured
+        if not openai_client:
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="圖片分析功能未設定，請設定 OPENAI_API_KEY")],
+                )
+            )
+            return
+
+        try:
+            # Download image content from LINE
+            image_content = blob_api.get_message_content(event.message.id)
+
+            # Read image data
+            if hasattr(image_content, 'read'):
+                image_data = image_content.read()
+            elif hasattr(image_content, '__iter__') and not isinstance(image_content, bytes):
+                image_data = b''.join(chunk for chunk in image_content)
+            else:
+                image_data = image_content
+
+            # Check if user is in translation mode
+            if user_id in user_states and user_states[user_id].get("mode") == "translate_waiting":
+                target_language = user_states[user_id].get("target_language")
+                print(f"[DEBUG] User in translation mode, translating image text to: {target_language}")
+
+                # Reset timeout
+                user_states[user_id]["entered_at"] = time.time()
+
+                result = translate_image_text(image_data, target_language)
+
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(
+                            text=f"🖼️ 圖片翻譯\n\n{result}\n\n─────────\n💡 繼續傳送圖片或文字可持續翻譯\n輸入「取消」離開翻譯模式",
+                            quick_reply=QuickReply(items=[
+                                QuickReplyItem(action=MessageAction(label="🚪 離開翻譯模式", text="取消")),
+                                QuickReplyItem(action=MessageAction(label="🔄 切換語言", text="切換語言")),
+                            ])
+                        )],
+                    )
+                )
+
+                # Save to Notion
+                save_to_notion(
+                    title=f"圖片翻譯：{target_language}",
+                    content_type="翻譯",
+                    category="翻譯",
+                    content=result,
+                    target_language=target_language,
+                    user_id=user_id
+                )
+                return
+
+            # Normal image analysis
+            result = analyze_image(image_data)
+
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=f"🖼️ 圖片分析\n\n{result}")],
+                )
+            )
+            print(f"[DEBUG] Image analysis sent successfully")
+
+            # Save to Notion
+            parsed = parse_summary_response(result)
+            save_to_notion(
+                title=parsed["title"] or "圖片分析",
+                content_type="圖片分析",
+                category=parsed["category"],
+                content=result,
+                keywords=parsed["keywords"],
+                user_id=user_id
+            )
+
+        except Exception as e:
+            print(f"[DEBUG] Image processing error: {str(e)}")
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=f"圖片處理失敗：{str(e)}")],
+                )
+            )
 
 
 @handler.add(MessageEvent, message=AudioMessageContent)
