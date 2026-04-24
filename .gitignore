@@ -11,3 +11,18 @@ wheels/
 
 # Environment variables
 .env
+.env.*
+
+# Google Service Account credentials (NEVER commit these)
+gdrive_credentials*.json
+*credentials*.json
+*service_account*.json
+
+# Claude session files
+.claude/settings.local.json
+.claude/launch.json
+
+# Misc temp files
+HANDOVER.md
+PLAN.md
+guide.html

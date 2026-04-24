@@ -4,6 +4,7 @@ import tempfile
 import time
 import threading
 import base64
+from datetime import datetime, timedelta
 from flask import Flask, request, abort
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -11,6 +12,9 @@ import google.generativeai as genai
 import requests
 from bs4 import BeautifulSoup
 from notion_client import Client as NotionClient
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaInMemoryUpload
 
 from apify_client import ApifyClient
 
@@ -42,6 +46,9 @@ NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 NOTION_SOCIAL_DATABASE_ID = os.getenv("NOTION_SOCIAL_DATABASE_ID")
 APIFY_API_KEY = os.getenv("APIFY_API_KEY")
+GDRIVE_CREDENTIALS_FILE = os.getenv("GDRIVE_CREDENTIALS_FILE", "gdrive_credentials.json")
+GDRIVE_VAULT_FOLDER_ID = os.getenv("GDRIVE_VAULT_FOLDER_ID")
+GOOGLE_CALENDAR_IDS = [cid.strip() for cid in os.getenv("GOOGLE_CALENDAR_ID", "primary").split(",") if cid.strip()]
 
 if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET:
     raise ValueError("Please set LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET in .env file")
@@ -75,6 +82,10 @@ if APIFY_API_KEY:
 # User states for translation mode (in-memory storage)
 # Structure: { user_id: { "mode": "translate", "target_language": "English", "entered_at": timestamp } }
 user_states = {}
+
+# Track last saved file per user for "補充想法" feature
+# Structure: { user_id: { "file_id": "...", "title": "...", "saved_at": timestamp } }
+user_last_file = {}
 
 # Translation mode timeout (5 minutes)
 TRANSLATION_MODE_TIMEOUT = 5 * 60  # 5 minutes in seconds
@@ -646,7 +657,7 @@ def summarize_social_post(post_data: dict, platform: str) -> str:
 🎯 貼文類型：[只選一個：資訊分享、個人心得、產品推廣、新聞報導、教學內容、娛樂內容、活動宣傳、其他]
 """
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             messages=[
                 {"role": "system", "content": "你是一個專業的社群媒體分析助手，擅長分析貼文內容並提取關鍵資訊。"},
                 {"role": "user", "content": prompt}
@@ -688,156 +699,37 @@ def parse_social_summary_response(response: str) -> dict:
     return result
 
 
-def save_social_to_notion(
-    platform: str,
-    username: str,
-    summary: str,
-    original_text: str,
-    keywords: list[str],
-    likes: int,
-    comments: int,
-    shares: int,
-    source_url: str,
-    post_type: str = "其他",
-    user_id: str = None,
-    images: list[str] = None,
-    image_text: str = None
-) -> bool:
-    """Save social media post to Notion database
-
-    Args:
-        platform: "Facebook" | "Threads"
-        username: Account name
-        summary: AI-generated summary
-        original_text: Original post content
-        keywords: List of keywords
-        likes: Like count
-        comments: Comment count
-        shares: Share count
-        source_url: Original post URL
-        post_type: Post type category
-        user_id: LINE User ID
-        images: List of image URLs
-        image_text: OCR text from images
-
-    Returns:
-        True if saved successfully, False otherwise
-    """
-    if not notion_client:
-        print("[DEBUG] Notion not configured, skipping save")
-        return False
-
-    # Use dedicated social database if available, otherwise use default
-    database_id = NOTION_SOCIAL_DATABASE_ID or NOTION_DATABASE_ID
-    if not database_id:
-        print("[DEBUG] No Notion database ID configured")
-        return False
-
-    try:
-        # Build title: account name + summary snippet
-        title = f"[{platform}] {username}: {summary[:50]}..." if len(summary) > 50 else f"[{platform}] {username}: {summary}"
-
-        properties = {
-            "名稱": {"title": [{"text": {"content": title[:100]}}]},
-            "平台": {"select": {"name": platform}},
-            "帳號": {"rich_text": [{"text": {"content": username[:100]}}]},
-            "內容摘要": {"rich_text": [{"text": {"content": summary[:2000]}}]},
-            "原始內容": {"rich_text": [{"text": {"content": original_text[:2000] if original_text else ""}}]},
-            "來源網址": {"url": source_url},
-        }
-
-        # Add keywords as multi-select
-        if keywords:
-            properties["關鍵字"] = {"multi_select": [{"name": kw[:100]} for kw in keywords[:10]]}
-
-        # Add numeric fields (only if the database has these columns)
-        # These will be added if the database supports them
-        try:
-            properties["Likes"] = {"number": likes}
-            properties["留言數"] = {"number": comments}
-            properties["分享數"] = {"number": shares}
-        except Exception:
-            pass
-
-        # Add category/type
-        if post_type:
-            properties["類型"] = {"select": {"name": post_type}}
-
-        if user_id:
-            properties["LINE 用戶"] = {"rich_text": [{"text": {"content": user_id}}]}
-
-        # Add image URLs
-        if images:
-            image_urls_text = "\n".join(images[:5])  # Limit to 5 images
-            properties["圖片"] = {"rich_text": [{"text": {"content": image_urls_text[:2000]}}]}
-
-        # Add image OCR text
-        if image_text:
-            properties["圖片文字"] = {"rich_text": [{"text": {"content": image_text[:2000]}}]}
-
-        # Create page in database
-        notion_client.pages.create(
-            parent={"database_id": database_id},
-            properties=properties
-        )
-
-        print(f"[DEBUG] Saved social post to Notion: {title[:50]}...")
-        return True
-
-    except Exception as e:
-        print(f"[DEBUG] Notion save error: {str(e)}")
-        return False
-
-
 def fetch_webpage_content(url: str) -> str:
-    """Fetch and extract key content from a webpage"""
+    """Fetch webpage content via Jina AI Reader (handles JS rendering, returns clean markdown)"""
     try:
+        jina_url = f"https://r.jina.ai/{url}"
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'Accept': 'text/plain',
+            'X-Return-Format': 'markdown',
         }
-        response = requests.get(url, headers=headers, timeout=5)
+        response = requests.get(jina_url, headers=headers, timeout=15)
         response.raise_for_status()
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # Get title
-        title = ""
-        if soup.title:
-            title = soup.title.string or ""
-
-        # Get meta description
-        description = ""
-        meta_desc = soup.find('meta', attrs={'name': 'description'})
-        if meta_desc:
-            description = meta_desc.get('content', '')
-
-        # Get og:description as fallback
-        if not description:
-            og_desc = soup.find('meta', attrs={'property': 'og:description'})
-            if og_desc:
-                description = og_desc.get('content', '')
-
-        # Remove unnecessary elements
-        for element in soup(['script', 'style', 'nav', 'header', 'footer', 'aside', 'iframe', 'noscript']):
-            element.decompose()
-
-        # Get article content
-        article = soup.find('article') or soup.find('main') or soup.find('div', class_=lambda x: x and 'content' in x.lower() if x else False)
-
-        if article:
-            content = article.get_text(separator='\n', strip=True)
-        else:
+        content = response.text
+        if len(content) > 3000:
+            content = content[:3000] + "..."
+        return content
+    except Exception as e:
+        print(f"[DEBUG] Jina AI fetch failed: {str(e)}, falling back to direct fetch")
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            response = requests.get(url, headers=headers, timeout=5)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for element in soup(['script', 'style', 'nav', 'header', 'footer', 'aside', 'iframe', 'noscript']):
+                element.decompose()
             content = soup.get_text(separator='\n', strip=True)
-
-        # Clean up - remove extra whitespace and short lines
-        lines = [line.strip() for line in content.split('\n') if len(line.strip()) > 20]
-        content = '\n'.join(lines)
-
-        # Limit content length
-        if len(content) > 2000:
-            content = content[:2000] + "..."
-
-        return f"標題：{title}\n\n描述：{description}\n\n內文：\n{content}"
+            lines = [line.strip() for line in content.split('\n') if len(line.strip()) > 20]
+            content = '\n'.join(lines)
+            if len(content) > 2000:
+                content = content[:2000] + "..."
+            return content
+        except Exception as e2:
+            return f"無法抓取網頁內容：{str(e2)}"
 
     except Exception as e:
         return f"無法抓取網頁內容：{str(e)}"
@@ -853,26 +745,27 @@ def summarize_webpage(content: str) -> str:
 
 {content}
 
-請用以下格式回覆（每個欄位只填一個值）：
+請用以下格式回覆：
 
-🏷️ 分類：[只選一個：科技、AI、金融、商業、新聞、教學、運動、美食、旅遊、地圖、生活、娛樂、其他]
+🏷️ 分類：[只選一個：科技、AI、金融、商業、新聞、教學、運動、美食、旅遊、地圖、電影、書籍、投資、生活、娛樂、其他]
 
 📌 主題：[一句話描述核心主題]
 
 📝 重點摘要：
-• [重點1 - 詳細說明]
-• [重點2 - 詳細說明]
-• [重點3 - 詳細說明]
-（依內容提供3-5個重點）
+• [重點1]
+• [重點2]
+• [重點3]
 
-🔑 關鍵字：[列出3-5個關鍵字，用頓號分隔，例如：人工智慧、程式設計、自動化]
+🔑 關鍵字：[3-5個關鍵字，用頓號分隔]
 
-🎯 一句話總結：[用一句話總結整篇文章的核心價值]
+🎯 一句話總結：[核心價值或啟發]
+
+💭 建議思考：[這個資訊對你有什麼用？可以如何應用？]
 """
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             messages=[
-                {"role": "system", "content": "你是一個專業的網頁摘要助手，擅長提取重點並用繁體中文清晰呈現。"},
+                {"role": "system", "content": "你是一個幫助用戶建立個人知識庫的助手，擅長提取網頁重點，並引導用戶思考如何應用這些資訊，用繁體中文清晰呈現。"},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=1500,
@@ -918,7 +811,7 @@ def summarize_google_maps(content: str, url: str) -> str:
 注意：如果無法從內容判斷某些資訊，請標註「無法判斷」而非猜測。
 """
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             messages=[
                 {"role": "system", "content": "你是一個專業的地點分析助手，擅長從 Google 地圖資訊中提取地點類型、地區和詳細資訊。"},
                 {"role": "user", "content": prompt}
@@ -1017,74 +910,673 @@ def parse_summary_response(response: str) -> dict:
     return result
 
 
-def save_to_notion(
+def get_gdrive_service():
+    """Initialize Google Drive service.
+    Uses GDRIVE_CREDENTIALS_JSON env var (for Zeabur) or falls back to local file."""
+    import json as _json
+    scopes = ['https://www.googleapis.com/auth/drive']
+    credentials_json = os.getenv("GDRIVE_CREDENTIALS_JSON")
+    if credentials_json:
+        info = _json.loads(credentials_json)
+        credentials = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    else:
+        credentials = service_account.Credentials.from_service_account_file(
+            GDRIVE_CREDENTIALS_FILE, scopes=scopes
+        )
+    return build('drive', 'v3', credentials=credentials)
+
+
+def get_calendar_service():
+    """Initialize Google Calendar service using service account credentials"""
+    import json as _json
+    scopes = ['https://www.googleapis.com/auth/calendar']
+    credentials_json = os.getenv("GDRIVE_CREDENTIALS_JSON")
+    if credentials_json:
+        info = _json.loads(credentials_json)
+        credentials = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    else:
+        credentials = service_account.Credentials.from_service_account_file(
+            GDRIVE_CREDENTIALS_FILE, scopes=scopes
+        )
+    return build('calendar', 'v3', credentials=credentials)
+
+
+def parse_event_from_text(text: str) -> dict | None:
+    """Use AI to parse natural language into structured calendar event"""
+    if not openai_client:
+        return None
+    today = datetime.now()
+    today_str = today.strftime("%Y-%m-%d")
+    weekday_map = {"Monday": "週一", "Tuesday": "週二", "Wednesday": "週三",
+                   "Thursday": "週四", "Friday": "週五", "Saturday": "週六", "Sunday": "週日"}
+    weekday_str = weekday_map.get(today.strftime("%A"), today.strftime("%A"))
+    try:
+        import json as _json
+        response = openai_client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[{
+                "role": "user",
+                "content": f"""今天是 {today_str}（{weekday_str}）。
+請從以下文字提取行事曆事件，用 JSON 格式回覆（只回 JSON，不要加說明）：
+
+文字：{text}
+
+格式：
+{{
+  "title": "事件標題",
+  "date": "YYYY-MM-DD",
+  "start_time": "HH:MM",
+  "end_time": "HH:MM",
+  "location": "地點或空字串",
+  "description": "備註或空字串"
+}}
+
+規則：
+- 「明天」= {(today + timedelta(days=1)).strftime("%Y-%m-%d")}
+- 「後天」= {(today + timedelta(days=2)).strftime("%Y-%m-%d")}
+- 「週X」= 換算成最近那天的日期
+- 只說時間沒說結束時間 → 預設 1 小時
+- 全天行程：start_time 和 end_time 都填 "00:00"
+"""
+            }],
+            max_tokens=250,
+            temperature=0.1
+        )
+        raw = response.choices[0].message.content.strip()
+        raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=re.MULTILINE)
+        return _json.loads(raw)
+    except Exception as e:
+        print(f"[DEBUG] Parse event error: {str(e)}")
+        return None
+
+
+def create_calendar_event(title: str, date: str, start_time: str, end_time: str,
+                          location: str = "", description: str = "") -> int:
+    """Create event on ALL configured calendars. Returns count of successes."""
+    try:
+        service = get_calendar_service()
+        if start_time == "00:00" and end_time == "00:00":
+            event_body = {
+                'summary': title,
+                'location': location,
+                'description': description,
+                'start': {'date': date, 'timeZone': 'Asia/Taipei'},
+                'end': {'date': date, 'timeZone': 'Asia/Taipei'},
+                'reminders': {'useDefault': True},
+            }
+        else:
+            event_body = {
+                'summary': title,
+                'location': location,
+                'description': description,
+                'start': {'dateTime': f"{date}T{start_time}:00+08:00", 'timeZone': 'Asia/Taipei'},
+                'end': {'dateTime': f"{date}T{end_time}:00+08:00", 'timeZone': 'Asia/Taipei'},
+                'reminders': {
+                    'useDefault': False,
+                    'overrides': [
+                        {'method': 'popup', 'minutes': 30},
+                        {'method': 'email', 'minutes': 60},
+                    ],
+                },
+            }
+        success = 0
+        for cal_id in GOOGLE_CALENDAR_IDS:
+            try:
+                service.events().insert(calendarId=cal_id, body=event_body).execute()
+                print(f"[DEBUG] Created event '{title}' in calendar: {cal_id}")
+                success += 1
+            except Exception as e:
+                print(f"[DEBUG] Failed to create event in {cal_id}: {str(e)}")
+        return success
+    except Exception as e:
+        print(f"[DEBUG] Create event error: {str(e)}")
+        return 0
+
+
+def list_upcoming_events(days: int = 7) -> list:
+    """List upcoming events across ALL configured calendars, deduped by title+time"""
+    try:
+        service = get_calendar_service()
+        now = datetime.utcnow().isoformat() + 'Z'
+        end = (datetime.utcnow() + timedelta(days=days)).isoformat() + 'Z'
+        seen = set()
+        all_events = []
+        for cal_id in GOOGLE_CALENDAR_IDS:
+            try:
+                result = service.events().list(
+                    calendarId=cal_id,
+                    timeMin=now, timeMax=end,
+                    maxResults=20, singleEvents=True, orderBy='startTime'
+                ).execute()
+                for ev in result.get('items', []):
+                    key = (ev.get('summary', ''), ev['start'].get('dateTime', ev['start'].get('date', '')))
+                    if key not in seen:
+                        seen.add(key)
+                        all_events.append(ev)
+            except Exception as e:
+                print(f"[DEBUG] List events error for {cal_id}: {str(e)}")
+        all_events.sort(key=lambda e: e['start'].get('dateTime', e['start'].get('date', '')))
+        return all_events
+    except Exception as e:
+        print(f"[DEBUG] List events error: {str(e)}")
+        return []
+
+
+def format_event_list(events: list, label: str = "") -> str:
+    """Format events list for LINE message"""
+    if not events:
+        return f"{label}沒有任何行程" if label else "沒有任何行程"
+    lines = [f"📅 {label}行程（共 {len(events)} 個）\n"] if label else [f"📅 行程（共 {len(events)} 個）\n"]
+    current_date = ""
+    for event in events:
+        start = event['start'].get('dateTime', event['start'].get('date', ''))
+        if 'T' in start:
+            dt = datetime.fromisoformat(start.replace('Z', '+00:00'))
+            date_str = dt.strftime("%-m/%-d（%a）").replace(
+                "Mon", "週一").replace("Tue", "週二").replace("Wed", "週三").replace(
+                "Thu", "週四").replace("Fri", "週五").replace("Sat", "週六").replace("Sun", "週日")
+            time_str = dt.strftime("%H:%M")
+        else:
+            date_str = start[5:].replace('-', '/')
+            time_str = "全天"
+        if date_str != current_date:
+            current_date = date_str
+            lines.append(f"\n{date_str}")
+        title = event.get('summary', '（無標題）')
+        loc = event.get('location', '')
+        loc_str = f" ｜ {loc}" if loc else ""
+        lines.append(f"  • {time_str} {title}{loc_str}")
+    return "\n".join(lines)
+
+
+def get_today_events() -> list:
+    """List today's events across ALL configured calendars, deduped"""
+    try:
+        service = get_calendar_service()
+        today = datetime.now().strftime("%Y-%m-%d")
+        start = f"{today}T00:00:00+08:00"
+        end = f"{today}T23:59:59+08:00"
+        seen = set()
+        all_events = []
+        for cal_id in GOOGLE_CALENDAR_IDS:
+            try:
+                result = service.events().list(
+                    calendarId=cal_id,
+                    timeMin=start, timeMax=end,
+                    maxResults=20, singleEvents=True, orderBy='startTime'
+                ).execute()
+                for ev in result.get('items', []):
+                    key = (ev.get('summary', ''), ev['start'].get('dateTime', ev['start'].get('date', '')))
+                    if key not in seen:
+                        seen.add(key)
+                        all_events.append(ev)
+            except Exception as e:
+                print(f"[DEBUG] Get today events error for {cal_id}: {str(e)}")
+        all_events.sort(key=lambda e: e['start'].get('dateTime', e['start'].get('date', '')))
+        return all_events
+    except Exception as e:
+        print(f"[DEBUG] Get today events error: {str(e)}")
+        return []
+
+
+def get_or_create_folder(service, folder_name: str, parent_id: str) -> str:
+    """Get existing folder or create it if not found"""
+    safe_name = folder_name.replace("'", "\\'")
+    query = (
+        f"name='{safe_name}' and '{parent_id}' in parents "
+        f"and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    )
+    results = service.files().list(q=query, fields='files(id)').execute()
+    files = results.get('files', [])
+    if files:
+        return files[0]['id']
+    metadata = {
+        'name': folder_name,
+        'mimeType': 'application/vnd.google-apps.folder',
+        'parents': [parent_id]
+    }
+    folder = service.files().create(body=metadata, fields='id').execute()
+    return folder['id']
+
+
+def save_to_gdrive(
     title: str,
     content_type: str,
     category: str,
     content: str,
     source_url: str = None,
     original_text: str = None,
-    keywords: list[str] = None,
+    keywords: list = None,
     target_language: str = None,
     user_id: str = None
 ) -> bool:
-    """Save content to Notion database
-
-    Args:
-        title: Main title/subject
-        content_type: "URL摘要" | "語音轉文字" | "翻譯"
-        category: Category from the predefined list
-        content: Full summary/transcription/translation content
-        source_url: Original URL (for URL summaries)
-        original_text: Original text (for translations)
-        keywords: List of keywords extracted by AI
-        target_language: Target language (for translations)
-        user_id: LINE User ID
-
-    Returns:
-        True if saved successfully, False otherwise
-    """
-    if not notion_client or not NOTION_DATABASE_ID:
-        print("[DEBUG] Notion not configured, skipping save")
+    """Save content as .md file to ObsidianVault in Google Drive"""
+    if not GDRIVE_VAULT_FOLDER_ID:
+        print("[DEBUG] GDRIVE_VAULT_FOLDER_ID not set, skipping save")
         return False
-
     try:
-        # Build properties
-        properties = {
-            "標題": {"title": [{"text": {"content": title[:100] if title else "無標題"}}]},
-            "類型": {"select": {"name": content_type}},
-            "分類": {"select": {"name": category}},
-            "內容": {"rich_text": [{"text": {"content": content[:2000] if content else ""}}]},
-        }
+        service = get_gdrive_service()
+        now = datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H%M%S")
+        month_str = now.strftime("%Y-%m")
 
-        # Add optional fields
-        if source_url:
-            properties["來源網址"] = {"url": source_url}
+        sources_id = get_or_create_folder(service, "Sources", GDRIVE_VAULT_FOLDER_ID)
+        month_id = get_or_create_folder(service, month_str, sources_id)
 
-        if original_text:
-            properties["原始文字"] = {"rich_text": [{"text": {"content": original_text[:2000]}}]}
-
+        tags = [category]
         if keywords:
-            properties["關鍵字"] = {"multi_select": [{"name": kw[:100]} for kw in keywords[:10]]}
+            tags.extend(keywords[:5])
 
+        frontmatter = f"---\ndate: {date_str}\ntype: {content_type}\ncategory: {category}\ntags: [{', '.join(tags)}]\n"
+        if source_url:
+            frontmatter += f"source: \"{source_url}\"\n"
         if target_language:
-            properties["目標語言"] = {"select": {"name": target_language}}
+            frontmatter += f"language: {target_language}\n"
+        frontmatter += "---\n\n"
 
-        if user_id:
-            properties["LINE 用戶"] = {"rich_text": [{"text": {"content": user_id}}]}
+        body = f"# {title}\n\n{content}\n"
+        if original_text:
+            body += f"\n## 原始文字\n{original_text}\n"
 
-        # Create page in database
-        notion_client.pages.create(
-            parent={"database_id": NOTION_DATABASE_ID},
-            properties=properties
-        )
+        full_content = frontmatter + body
+        safe_title = re.sub(r'[^\w\s\u4e00-\u9fff-]', '', title[:30]).strip()
+        filename = f"{date_str}-{time_str}-{content_type}-{safe_title}.md"
 
-        print(f"[DEBUG] Saved to Notion: {title[:50]}...")
-        return True
+        media = MediaInMemoryUpload(full_content.encode('utf-8'), mimetype='text/plain')
+        file_metadata = {'name': filename, 'parents': [month_id]}
+        result = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
+        print(f"[DEBUG] Saved to Google Drive: {filename}")
+        return result.get('id')
     except Exception as e:
-        print(f"[DEBUG] Notion save error: {str(e)}")
+        print(f"[DEBUG] Google Drive save error: {str(e)}")
+        return None
+
+
+def append_to_gdrive_file(file_id: str, extra_content: str) -> bool:
+    """Append additional thoughts to an existing Google Drive file"""
+    try:
+        service = get_gdrive_service()
+        existing = service.files().get_media(fileId=file_id).execute()
+        current_content = existing.decode('utf-8') if isinstance(existing, bytes) else existing
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        new_content = current_content + f"\n\n## 補充想法（{timestamp}）\n{extra_content}\n"
+        media = MediaInMemoryUpload(new_content.encode('utf-8'), mimetype='text/plain')
+        service.files().update(fileId=file_id, media_body=media).execute()
+        print(f"[DEBUG] Appended to file: {file_id}")
+        return True
+    except Exception as e:
+        print(f"[DEBUG] Append error: {str(e)}")
         return False
+
+
+def get_today_files() -> list:
+    """Get all files saved today from ObsidianVault"""
+    if not GDRIVE_VAULT_FOLDER_ID:
+        return []
+    try:
+        service = get_gdrive_service()
+        today = datetime.now().strftime("%Y-%m-%d")
+        month_str = datetime.now().strftime("%Y-%m")
+        sources_query = f"name='Sources' and '{GDRIVE_VAULT_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        sources_results = service.files().list(q=sources_query, fields='files(id)').execute()
+        sources_files = sources_results.get('files', [])
+        if not sources_files:
+            return []
+        sources_id = sources_files[0]['id']
+        month_query = f"name='{month_str}' and '{sources_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        month_results = service.files().list(q=month_query, fields='files(id)').execute()
+        month_files = month_results.get('files', [])
+        if not month_files:
+            return []
+        month_id = month_files[0]['id']
+        files_query = f"name contains '{today}' and '{month_id}' in parents and trashed=false"
+        results = service.files().list(q=files_query, fields='files(id, name)', orderBy='createdTime desc').execute()
+        return results.get('files', [])
+    except Exception as e:
+        print(f"[DEBUG] Get today files error: {str(e)}")
+        return []
+
+
+def read_gdrive_file(file_id: str) -> str:
+    """Read content of a Google Drive file by ID"""
+    try:
+        service = get_gdrive_service()
+        content = service.files().get_media(fileId=file_id).execute()
+        return content.decode('utf-8') if isinstance(content, bytes) else str(content)
+    except Exception as e:
+        print(f"[DEBUG] Read file error: {str(e)}")
+        return ""
+
+
+def list_sources_files_by_month(month_str: str = None, limit: int = 100) -> list[dict]:
+    """List .md files in Sources/YYYY-MM/, default to current month"""
+    if not GDRIVE_VAULT_FOLDER_ID:
+        return []
+    try:
+        service = get_gdrive_service()
+        if not month_str:
+            month_str = datetime.now().strftime("%Y-%m")
+        sources_query = f"name='Sources' and '{GDRIVE_VAULT_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        sources_id = service.files().list(q=sources_query, fields='files(id)').execute().get('files', [{}])[0].get('id')
+        if not sources_id:
+            return []
+        month_query = f"name='{month_str}' and '{sources_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        month_files = service.files().list(q=month_query, fields='files(id)').execute().get('files', [])
+        if not month_files:
+            return []
+        month_id = month_files[0]['id']
+        results = service.files().list(
+            q=f"'{month_id}' in parents and name contains '.md' and trashed=false",
+            fields='files(id, name)',
+            orderBy='createdTime desc',
+            pageSize=limit
+        ).execute()
+        return results.get('files', [])
+    except Exception as e:
+        print(f"[DEBUG] List sources error: {str(e)}")
+        return []
+
+
+def search_sources(keyword: str, limit: int = 8) -> list[dict]:
+    """Search Sources across all months for files matching keyword"""
+    if not GDRIVE_VAULT_FOLDER_ID:
+        return []
+    try:
+        service = get_gdrive_service()
+        sources_query = f"name='Sources' and '{GDRIVE_VAULT_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        sources_files = service.files().list(q=sources_query, fields='files(id)').execute().get('files', [])
+        if not sources_files:
+            return []
+        sources_id = sources_files[0]['id']
+        months_results = service.files().list(
+            q=f"'{sources_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+            fields='files(id, name)',
+            orderBy='name desc'
+        ).execute().get('files', [])
+        safe_kw = keyword.replace("'", "\\'")
+        all_matches = []
+        for month_folder in months_results[:6]:
+            results = service.files().list(
+                q=f"'{month_folder['id']}' in parents and name contains '.md' and trashed=false and (fullText contains '{safe_kw}' or name contains '{safe_kw}')",
+                fields='files(id, name)',
+                orderBy='createdTime desc'
+            ).execute().get('files', [])
+            all_matches.extend(results)
+            if len(all_matches) >= limit:
+                break
+        return all_matches[:limit]
+    except Exception as e:
+        print(f"[DEBUG] Search sources error: {str(e)}")
+        return []
+
+
+def find_vault_file(filename: str) -> str | None:
+    """Find a file by name in vault root, return file_id"""
+    try:
+        service = get_gdrive_service()
+        safe_name = filename.replace("'", "\\'")
+        results = service.files().list(
+            q=f"name='{safe_name}' and '{GDRIVE_VAULT_FOLDER_ID}' in parents and trashed=false",
+            fields='files(id)'
+        ).execute().get('files', [])
+        return results[0]['id'] if results else None
+    except Exception as e:
+        print(f"[DEBUG] Find vault file error: {str(e)}")
+        return None
+
+
+def update_gdrive_file_content(file_id: str, new_content: str) -> bool:
+    """Overwrite content of an existing Google Drive file"""
+    try:
+        service = get_gdrive_service()
+        media = MediaInMemoryUpload(new_content.encode('utf-8'), mimetype='text/plain')
+        service.files().update(fileId=file_id, media_body=media).execute()
+        return True
+    except Exception as e:
+        print(f"[DEBUG] Update file content error: {str(e)}")
+        return False
+
+
+def save_wiki_page(title: str, content: str, subfolder: str = None) -> str | None:
+    """Save/update a wiki page to Wiki/ folder, return file_id"""
+    if not GDRIVE_VAULT_FOLDER_ID:
+        return None
+    try:
+        service = get_gdrive_service()
+        wiki_id = get_or_create_folder(service, "Wiki", GDRIVE_VAULT_FOLDER_ID)
+        parent_id = get_or_create_folder(service, subfolder, wiki_id) if subfolder else wiki_id
+        safe_title = re.sub(r'[^\w\s\u4e00-\u9fff-]', '', title[:40]).strip()
+        filename = f"{safe_title}.md"
+        safe_name = filename.replace("'", "\\'")
+        existing = service.files().list(
+            q=f"name='{safe_name}' and '{parent_id}' in parents and trashed=false",
+            fields='files(id)'
+        ).execute().get('files', [])
+        media = MediaInMemoryUpload(content.encode('utf-8'), mimetype='text/plain')
+        if existing:
+            result = service.files().update(fileId=existing[0]['id'], media_body=media, fields='id').execute()
+            print(f"[DEBUG] Updated wiki page: {filename}")
+        else:
+            result = service.files().create(
+                body={'name': filename, 'parents': [parent_id]},
+                media_body=media, fields='id'
+            ).execute()
+            print(f"[DEBUG] Created wiki page: {filename}")
+        return result.get('id')
+    except Exception as e:
+        print(f"[DEBUG] Save wiki page error: {str(e)}")
+        return None
+
+
+def extract_frontmatter_category(content: str) -> str:
+    """Extract category from markdown frontmatter"""
+    match = re.search(r'^category:\s*(.+)$', content, re.MULTILINE)
+    return match.group(1).strip() if match else "其他"
+
+
+def consolidate_sources_to_wiki(topic: str, sources_texts: list[str]) -> str:
+    """AI: synthesize multiple source files into a structured wiki page"""
+    if not openai_client:
+        return ""
+    combined = "\n\n---\n\n".join(f"[來源 {i+1}]\n{text[:1500]}" for i, text in enumerate(sources_texts))
+    prompt = f"""你是 Kaku 的個人知識庫助手。請根據以下 {len(sources_texts)} 篇關於「{topic}」的原始筆記，整合成一篇結構化的 Wiki 頁面。
+
+原始筆記：
+{combined}
+
+請用以下格式輸出（Markdown，繁體中文）：
+
+# {topic}
+
+## 核心概念
+[2-3句話說明這個主題的核心]
+
+## 重點整理
+[用 bullet points 整合所有重點，去除重複，按重要性排序]
+
+## Kaku 的觀察與想法
+[從筆記中提取 Kaku 個人的觀點、疑問或行動建議]
+
+## 相關主題
+[列出 2-5 個相關的 [[Wiki連結]]，例如 [[投資]]、[[AI工具]] 等]
+
+## 來源統計
+- 共 {len(sources_texts)} 篇原始筆記
+- 最後整合：{datetime.now().strftime("%Y-%m-%d")}
+
+---
+_由 AI 自動整合 | [[index]] | [[log]]_
+"""
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": "你是幫助 Kaku 建立個人知識庫的 AI，擅長整合多篇筆記、提取核心洞見，用繁體中文清晰呈現。"},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=2000,
+            temperature=0.6
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"[DEBUG] Consolidate error: {str(e)}")
+        return ""
+
+
+def summarize_search_results(keyword: str, files_content: list[tuple[str, str]]) -> str:
+    """AI: summarize search results for a keyword query"""
+    if not openai_client or not files_content:
+        return ""
+    combined = "\n\n---\n\n".join(f"[筆記 {i+1}：{name}]\n{content[:800]}" for i, (name, content) in enumerate(files_content))
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": "你是 Kaku 的個人知識庫助手，幫助他快速回顧自己存過的相關筆記。用繁體中文，簡潔清晰。"},
+                {"role": "user", "content": f"Kaku 想查詢關於「{keyword}」的筆記。以下是找到的 {len(files_content)} 篇相關筆記，請整理重點給他：\n\n{combined}\n\n請用以下格式：\n\n📋 共找到 {len(files_content)} 筆相關記錄\n\n🔍 重點摘要：\n[整合所有筆記的核心重點，bullet points]\n\n💡 建議延伸：\n[基於這些筆記，建議 Kaku 可以深入思考或行動的方向]"}
+            ],
+            max_tokens=1000,
+            temperature=0.6
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"[DEBUG] Search summarize error: {str(e)}")
+        return ""
+
+
+def list_wiki_files() -> list[dict]:
+    """List all .md files under Wiki/ and its subfolders"""
+    if not GDRIVE_VAULT_FOLDER_ID:
+        return []
+    try:
+        service = get_gdrive_service()
+        wiki_folders = service.files().list(
+            q=f"name='Wiki' and '{GDRIVE_VAULT_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+            fields='files(id)'
+        ).execute().get('files', [])
+        if not wiki_folders:
+            return []
+        wiki_id = wiki_folders[0]['id']
+        subfolders = service.files().list(
+            q=f"'{wiki_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+            fields='files(id)'
+        ).execute().get('files', [])
+        all_files = []
+        for parent_id in [wiki_id] + [sf['id'] for sf in subfolders]:
+            files = service.files().list(
+                q=f"'{parent_id}' in parents and name contains '.md' and trashed=false",
+                fields='files(id, name)'
+            ).execute().get('files', [])
+            all_files.extend(files)
+        return all_files
+    except Exception as e:
+        print(f"[DEBUG] List wiki files error: {str(e)}")
+        return []
+
+
+def search_wiki_pages(keyword: str) -> list[dict]:
+    """Search Wiki pages for files matching keyword in name or content"""
+    if not GDRIVE_VAULT_FOLDER_ID:
+        return []
+    try:
+        service = get_gdrive_service()
+        wiki_folders = service.files().list(
+            q=f"name='Wiki' and '{GDRIVE_VAULT_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+            fields='files(id)'
+        ).execute().get('files', [])
+        if not wiki_folders:
+            return []
+        wiki_id = wiki_folders[0]['id']
+        subfolders = service.files().list(
+            q=f"'{wiki_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+            fields='files(id)'
+        ).execute().get('files', [])
+        safe_kw = keyword.replace("'", "\\'")
+        results = []
+        for parent_id in [wiki_id] + [sf['id'] for sf in subfolders]:
+            found = service.files().list(
+                q=f"'{parent_id}' in parents and name contains '.md' and trashed=false and (fullText contains '{safe_kw}' or name contains '{safe_kw}')",
+                fields='files(id, name)'
+            ).execute().get('files', [])
+            results.extend(found)
+        return results
+    except Exception as e:
+        print(f"[DEBUG] Search wiki error: {str(e)}")
+        return []
+
+
+def answer_from_knowledge_base(question: str, wiki_docs: list[tuple], source_docs: list[tuple]) -> str:
+    """AI: answer a question grounded in the user's personal knowledge base"""
+    if not openai_client:
+        return ""
+    context_parts = []
+    if wiki_docs:
+        context_parts.append("=== Wiki 知識頁面（整合後的知識）===")
+        for name, content in wiki_docs:
+            context_parts.append(f"[{name}]\n{content[:2000]}")
+    if source_docs:
+        context_parts.append("=== 原始筆記 ===")
+        for name, content in source_docs:
+            context_parts.append(f"[{name}]\n{content[:800]}")
+    context = "\n\n---\n\n".join(context_parts)
+    if not context.strip():
+        return f"知識庫中還沒有關於這個主題的筆記。\n\n💡 建議先用語音或文字記錄相關想法，存幾篇之後再來問。"
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是 Kaku 的個人 AI 助手，專門根據他的個人知識庫來回答問題。只能根據知識庫的內容回答，不要加入知識庫以外的資訊。知識庫沒有提到的事情，明確說明需要 Kaku 自己補充。用繁體中文，簡潔有力。"
+                },
+                {
+                    "role": "user",
+                    "content": f"問題：{question}\n\n知識庫內容：\n{context}\n\n請用以下格式回答：\n\n💡 回答：\n[基於知識庫的回答，2-4句話]\n\n📚 依據：\n[列出主要參考了哪些筆記]\n\n🔍 知識缺口：\n[哪些資訊不足，建議補充什麼]"
+                }
+            ],
+            max_tokens=1200,
+            temperature=0.5
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"[DEBUG] Answer from KB error: {str(e)}")
+        return ""
+
+
+def save_social_to_gdrive(
+    platform: str,
+    username: str,
+    summary: str,
+    original_text: str,
+    keywords: list,
+    likes: int,
+    comments: int,
+    shares: int,
+    source_url: str,
+    post_type: str = "其他",
+    user_id: str = None,
+    images: list = None,
+    image_text: str = None
+) -> bool:
+    """Save social media post as .md file to Google Drive"""
+    content = f"{summary}\n\n**互動數據：** {likes} 讚 | {comments} 留言 | {shares} 分享"
+    if image_text:
+        content += f"\n\n**圖片文字：**\n{image_text}"
+    if images:
+        content += f"\n\n**圖片連結：**\n" + "\n".join(f"- {img}" for img in images[:5])
+
+    return save_to_gdrive(
+        title=f"{platform}-{username}",
+        content_type="社群分析",
+        category=platform,
+        content=content,
+        source_url=source_url,
+        original_text=original_text,
+        keywords=keywords,
+        user_id=user_id
+    )
 
 
 @app.route("/callback", methods=["POST"])
@@ -1116,7 +1608,7 @@ def translate_text(text: str, target_language: str) -> str:
 3. 如果有專有名詞，請使用當地常用的翻譯方式
 """
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             messages=[
                 {"role": "system", "content": f"你是一個專業的翻譯助手，擅長將各種語言翻譯成{target_language}。只輸出翻譯結果，不加任何額外說明。"},
                 {"role": "user", "content": prompt}
@@ -1159,26 +1651,27 @@ def summarize_text(text: str) -> str:
 
 {text}
 
-請用以下格式回覆（每個欄位只填一個值）：
+請用以下格式回覆：
 
-🏷️ 分類：[只選一個：科技、AI、商業、新聞、教學、生活、娛樂、筆記、想法、其他]
+🏷️ 分類：[只選一個：科技、AI、商業、新聞、教學、旅遊、美食、電影、書籍、投資、生活、娛樂、筆記、想法、其他]
 
 📌 主題：[一句話描述核心主題]
 
 📝 重點摘要：
-• [重點1 - 詳細說明]
-• [重點2 - 詳細說明]
-• [重點3 - 詳細說明]
-（依內容提供3-5個重點）
+• [重點1]
+• [重點2]
+• [重點3]
 
-🔑 關鍵字：[列出3-5個關鍵字，用頓號分隔，例如：人工智慧、程式設計、自動化]
+🔑 關鍵字：[3-5個關鍵字，用頓號分隔]
 
-🎯 一句話總結：[用一句話總結整段文字的核心內容]
+🎯 一句話總結：[核心價值或啟發]
+
+💭 建議思考：[根據內容，提一個值得深思的問題或行動建議]
 """
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             messages=[
-                {"role": "system", "content": "你是一個專業的文字摘要助手，擅長提取重點、分類內容，並用繁體中文清晰呈現。"},
+                {"role": "system", "content": "你是一個幫助用戶建立個人知識庫的助手，擅長提取重點、分類內容，並引導用戶深度思考，用繁體中文清晰呈現。"},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=1500,
@@ -1199,6 +1692,360 @@ def handle_text_message(event):
         text = event.message.text.strip()
         user_id = event.source.user_id
         print(f"[DEBUG] Received text: {text}, user_id: {user_id}")
+
+        # 今日回顧指令
+        if text in ["今日回顧", "今天存了什麼", "回顧"]:
+            files = get_today_files()
+            if not files:
+                reply_text = "今天還沒有任何記錄，快去捕捉些什麼吧！"
+            else:
+                names = "\n".join(f"• {f['name'].replace('.md','')}" for f in files[:10])
+                reply_text = f"📚 今日記錄（共 {len(files)} 筆）\n\n{names}"
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(
+                    text=reply_text,
+                    quick_reply=QuickReply(items=[
+                        QuickReplyItem(action=MessageAction(label="🔍 搜尋筆記", text="查 ")),
+                        QuickReplyItem(action=MessageAction(label="📂 整理筆記", text="整理筆記")),
+                        QuickReplyItem(action=MessageAction(label="💭 補充想法", text="補充想法：")),
+                    ])
+                )])
+            )
+            return
+
+        # 補充想法指令
+        if text.startswith("補充想法：") or text.startswith("補充想法:"):
+            extra = text.split("：", 1)[-1].split(":", 1)[-1].strip()
+            last = user_last_file.get(user_id)
+            if last and extra:
+                success = append_to_gdrive_file(last["file_id"], extra)
+                if success:
+                    reply_msg = TextMessage(
+                        text=f"✅ 已補充到「{last['title']}」\n\n💭 {extra}",
+                        quick_reply=QuickReply(items=[
+                            QuickReplyItem(action=MessageAction(label="再補充一點", text="補充想法：")),
+                            QuickReplyItem(action=MessageAction(label="📚 今日回顧", text="今日回顧")),
+                        ])
+                    )
+                else:
+                    reply_msg = TextMessage(text="❌ 補充失敗，請稍後再試")
+            else:
+                reply_msg = TextMessage(text="找不到最近的筆記，請重新傳送一則訊息後再補充。")
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(reply_token=event.reply_token, messages=[reply_msg])
+            )
+            return
+
+        # 查詢指令：查 投資 / 搜尋 AI / 找 日本
+        query_match = re.match(r'^(?:查|搜尋|找)\s+(.+)$', text.strip())
+        if query_match:
+            keyword = query_match.group(1).strip()
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=f"🔍 正在搜尋「{keyword}」的相關筆記...")]
+                )
+            )
+
+            def _search_async(uid, kw):
+                try:
+                    matched_files = search_sources(kw, limit=8)
+                    if not matched_files:
+                        result_text = f"找不到關於「{kw}」的筆記\n\n💡 試試其他關鍵字，或先存一些相關內容"
+                    else:
+                        files_content = []
+                        for f in matched_files[:5]:
+                            content = read_gdrive_file(f['id'])
+                            if content:
+                                files_content.append((f['name'], content))
+                        if files_content:
+                            result_text = summarize_search_results(kw, files_content)
+                        else:
+                            names = "\n".join(f"• {f['name'].replace('.md','')}" for f in matched_files[:8])
+                            result_text = f"🔍 找到 {len(matched_files)} 筆關於「{kw}」的記錄：\n\n{names}"
+
+                    with ApiClient(configuration) as push_client:
+                        MessagingApi(push_client).push_message(PushMessageRequest(
+                            to=uid,
+                            messages=[TextMessage(
+                                text=result_text,
+                                quick_reply=QuickReply(items=[
+                                    QuickReplyItem(action=MessageAction(label="📚 今日回顧", text="今日回顧")),
+                                    QuickReplyItem(action=MessageAction(label="整理筆記", text="整理筆記")),
+                                ])
+                            )]
+                        ))
+                except Exception as ex:
+                    print(f"[DEBUG] Search async error: {str(ex)}")
+                    try:
+                        with ApiClient(configuration) as push_client:
+                            MessagingApi(push_client).push_message(PushMessageRequest(
+                                to=uid,
+                                messages=[TextMessage(text="❌ 搜尋失敗，請稍後再試")]
+                            ))
+                    except Exception:
+                        pass
+
+            threading.Thread(target=_search_async, args=(user_id, keyword), daemon=True).start()
+            return
+
+        # 整理筆記指令：讀取 Sources，整合成 Wiki 頁面
+        if text in ["整理筆記", "整理", "wiki整理", "Wiki整理"]:
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="📚 開始整理本月筆記...\n\n找出主題超過 3 篇的筆記，自動生成 Wiki 頁面。\n（通常需要 1-3 分鐘）")]
+                )
+            )
+
+            def _consolidate_async(uid):
+                try:
+                    month_str = datetime.now().strftime("%Y-%m")
+                    files = list_sources_files_by_month(month_str, limit=80)
+                    if not files:
+                        with ApiClient(configuration) as push_client:
+                            MessagingApi(push_client).push_message(PushMessageRequest(
+                                to=uid,
+                                messages=[TextMessage(text=f"本月（{month_str}）還沒有任何筆記")]
+                            ))
+                        return
+
+                    # Read all files and group by category
+                    category_files: dict[str, list[tuple[str, str]]] = {}
+                    for f in files:
+                        content = read_gdrive_file(f['id'])
+                        if not content:
+                            continue
+                        cat = extract_frontmatter_category(content)
+                        if cat not in category_files:
+                            category_files[cat] = []
+                        category_files[cat].append((f['name'], content))
+
+                    # Consolidate categories with 3+ files
+                    consolidated = []
+                    skipped = []
+                    for cat, cat_files in sorted(category_files.items(), key=lambda x: -len(x[1])):
+                        if len(cat_files) >= 3:
+                            texts = [c for _, c in cat_files]
+                            wiki_content = consolidate_sources_to_wiki(cat, texts)
+                            if wiki_content:
+                                save_wiki_page(cat, wiki_content)
+                                consolidated.append(f"✅ {cat}（{len(cat_files)} 篇）")
+                        else:
+                            skipped.append(f"⏳ {cat}（{len(cat_files)} 篇，未達 3 篇）")
+
+                    # Append to log.md
+                    log_id = find_vault_file("log.md")
+                    if log_id:
+                        log_content = read_gdrive_file(log_id)
+                        log_entry = f"\n\n## {datetime.now().strftime('%Y-%m-%d')} — 月度整理\n\n"
+                        log_entry += f"- 本月 Sources：{len(files)} 篇\n"
+                        for line in consolidated:
+                            log_entry += f"- 整合 Wiki：{line}\n"
+                        if skipped:
+                            log_entry += f"- 待累積：{', '.join(skipped)}\n"
+                        insert_pos = log_content.find('\n\n---')
+                        if insert_pos >= 0:
+                            new_log = log_content[:insert_pos] + log_entry + log_content[insert_pos:]
+                        else:
+                            new_log = log_content + log_entry
+                        update_gdrive_file_content(log_id, new_log)
+
+                    # Build reply
+                    summary_lines = [f"📚 整理完成（{month_str}）\n"]
+                    summary_lines.append(f"共 {len(files)} 篇筆記 → {len(consolidated)} 個 Wiki 頁面\n")
+                    if consolidated:
+                        summary_lines.append("已生成 Wiki：")
+                        summary_lines.extend(consolidated)
+                    if skipped:
+                        summary_lines.append("\n待累積（未達 3 篇）：")
+                        summary_lines.extend(skipped)
+                    result_text = "\n".join(summary_lines)
+
+                    with ApiClient(configuration) as push_client:
+                        MessagingApi(push_client).push_message(PushMessageRequest(
+                            to=uid,
+                            messages=[TextMessage(
+                                text=result_text,
+                                quick_reply=QuickReply(items=[
+                                    QuickReplyItem(action=MessageAction(label="📚 今日回顧", text="今日回顧")),
+                                    QuickReplyItem(action=MessageAction(label="🔍 搜尋筆記", text="查 ")),
+                                ])
+                            )]
+                        ))
+                except Exception as ex:
+                    print(f"[DEBUG] Consolidate async error: {str(ex)}")
+                    try:
+                        with ApiClient(configuration) as push_client:
+                            MessagingApi(push_client).push_message(PushMessageRequest(
+                                to=uid,
+                                messages=[TextMessage(text="❌ 整理失敗，請稍後再試")]
+                            ))
+                    except Exception:
+                        pass
+
+            threading.Thread(target=_consolidate_async, args=(user_id,), daemon=True).start()
+            return
+
+        # 查行程指令
+        schedule_query = re.match(r'^(?:查行程|行程|今天行程|明天行程|這週行程|下週行程|本週行程)$', text.strip())
+        if schedule_query:
+            keyword = text.strip()
+            if "今天" in keyword:
+                events = get_today_events()
+                reply = format_event_list(events, "今天的")
+            elif "明天" in keyword:
+                try:
+                    service = get_calendar_service()
+                    tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+                    start = f"{tomorrow}T00:00:00+08:00"
+                    end = f"{tomorrow}T23:59:59+08:00"
+                    result = service.events().list(
+                        calendarId=GOOGLE_CALENDAR_ID, timeMin=start, timeMax=end,
+                        maxResults=10, singleEvents=True, orderBy='startTime'
+                    ).execute()
+                    events = result.get('items', [])
+                    reply = format_event_list(events, "明天的")
+                except Exception:
+                    reply = "❌ 無法取得行程，請確認行事曆已設定"
+            else:
+                days = 14 if "下週" in keyword else 7
+                events = list_upcoming_events(days=days)
+                label = "這週" if days == 7 else "近兩週"
+                reply = format_event_list(events, label)
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(
+                    text=reply,
+                    quick_reply=QuickReply(items=[
+                        QuickReplyItem(action=MessageAction(label="今天行程", text="今天行程")),
+                        QuickReplyItem(action=MessageAction(label="這週行程", text="這週行程")),
+                        QuickReplyItem(action=MessageAction(label="加行程", text="加行程：")),
+                    ])
+                )])
+            )
+            return
+
+        # 加行程指令
+        add_event_match = re.match(r'^(?:加行程|新增行程|加入行程|記行程)[：:]\s*(.+)$', text.strip())
+        if add_event_match:
+            event_text = add_event_match.group(1).strip()
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(reply_token=event.reply_token,
+                    messages=[TextMessage(text=f"📅 正在新增行程...\n「{event_text}」")])
+            )
+
+            def _add_event_async(uid, evt_text):
+                try:
+                    parsed = parse_event_from_text(evt_text)
+                    if not parsed or not parsed.get('title') or not parsed.get('date'):
+                        with ApiClient(configuration) as push_client:
+                            MessagingApi(push_client).push_message(PushMessageRequest(
+                                to=uid,
+                                messages=[TextMessage(text="❌ 無法解析行程內容\n\n試試這個格式：\n加行程：週五下午3點 跟 Jason 開會 地點：台北")]
+                            ))
+                        return
+                    result = create_calendar_event(
+                        title=parsed['title'],
+                        date=parsed['date'],
+                        start_time=parsed.get('start_time', '09:00'),
+                        end_time=parsed.get('end_time', '10:00'),
+                        location=parsed.get('location', ''),
+                        description=parsed.get('description', '')
+                    )
+                    if result > 0:
+                        time_display = "全天" if parsed.get('start_time') == "00:00" else f"{parsed.get('start_time')} - {parsed.get('end_time')}"
+                        loc_str = f"\n📍 {parsed['location']}" if parsed.get('location') else ""
+                        note_str = f"\n📝 {parsed['description']}" if parsed.get('description') else ""
+                        cal_str = f"\n🗂 已同步 {result} 個行事曆" if len(GOOGLE_CALENDAR_IDS) > 1 else ""
+                        reply_text = (
+                            f"✅ 已加入行事曆\n\n"
+                            f"📌 {parsed['title']}\n"
+                            f"📅 {parsed['date']} {time_display}"
+                            f"{loc_str}{note_str}{cal_str}"
+                        )
+                    else:
+                        reply_text = "❌ 行程新增失敗，請確認 Calendar API 已啟用並把行事曆共用給 Service Account"
+                    with ApiClient(configuration) as push_client:
+                        MessagingApi(push_client).push_message(PushMessageRequest(
+                            to=uid,
+                            messages=[TextMessage(
+                                text=reply_text,
+                                quick_reply=QuickReply(items=[
+                                    QuickReplyItem(action=MessageAction(label="查行程", text="這週行程")),
+                                    QuickReplyItem(action=MessageAction(label="再加一個", text="加行程：")),
+                                ])
+                            )]
+                        ))
+                except Exception as ex:
+                    print(f"[DEBUG] Add event async error: {str(ex)}")
+                    try:
+                        with ApiClient(configuration) as push_client:
+                            MessagingApi(push_client).push_message(PushMessageRequest(
+                                to=uid, messages=[TextMessage(text="❌ 新增行程失敗，請稍後再試")]
+                            ))
+                    except Exception:
+                        pass
+
+            threading.Thread(target=_add_event_async, args=(user_id, event_text), daemon=True).start()
+            return
+
+        # 問 XXX 指令：根據個人知識庫回答問題
+        ask_match = re.match(r'^(?:問|請問)\s+(.+)$', text.strip())
+        if ask_match:
+            question = ask_match.group(1).strip()
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=f"🧠 正在查詢你的知識庫...\n\n問題：{question}")]
+                )
+            )
+
+            def _answer_async(uid, q):
+                try:
+                    wiki_matches = search_wiki_pages(q)
+                    source_matches = search_sources(q, limit=5)
+
+                    wiki_docs = []
+                    for f in wiki_matches[:4]:
+                        content = read_gdrive_file(f['id'])
+                        if content:
+                            wiki_docs.append((f['name'], content))
+
+                    source_docs = []
+                    for f in source_matches[:4]:
+                        content = read_gdrive_file(f['id'])
+                        if content:
+                            source_docs.append((f['name'], content))
+
+                    result = answer_from_knowledge_base(q, wiki_docs, source_docs)
+                    if not result:
+                        result = "❌ 回答生成失敗，請稍後再試"
+
+                    with ApiClient(configuration) as push_client:
+                        MessagingApi(push_client).push_message(PushMessageRequest(
+                            to=uid,
+                            messages=[TextMessage(
+                                text=f"🧠 根據你的知識庫\n\n{result}",
+                                quick_reply=QuickReply(items=[
+                                    QuickReplyItem(action=MessageAction(label="💭 補充想法", text="補充想法：")),
+                                    QuickReplyItem(action=MessageAction(label="🔍 再搜尋", text="查 ")),
+                                    QuickReplyItem(action=MessageAction(label="📂 整理筆記", text="整理筆記")),
+                                ])
+                            )]
+                        ))
+                except Exception as ex:
+                    print(f"[DEBUG] Answer async error: {str(ex)}")
+                    try:
+                        with ApiClient(configuration) as push_client:
+                            MessagingApi(push_client).push_message(PushMessageRequest(
+                                to=uid,
+                                messages=[TextMessage(text="❌ 查詢失敗，請稍後再試")]
+                            ))
+                    except Exception:
+                        pass
+
+            threading.Thread(target=_answer_async, args=(user_id, question), daemon=True).start()
+            return
 
         # Check if user is in translation mode (waiting for content to translate)
         if user_id in user_states and user_states[user_id].get("mode") == "translate_waiting":
@@ -1258,7 +2105,7 @@ def handle_text_message(event):
                 print(f"[DEBUG] Translation in mode sent successfully")
 
                 # Save to Notion
-                save_to_notion(
+                save_to_gdrive(
                     title=f"翻譯：{text[:50]}...",
                     content_type="翻譯",
                     category="翻譯",
@@ -1272,7 +2119,7 @@ def handle_text_message(event):
                 line_bot_api.reply_message_with_http_info(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
-                        messages=[TextMessage(text=f"❌ 翻譯失敗：{str(e)}")],
+                        messages=[TextMessage(text="❌ 翻譯失敗，請稍後再試")],
                     )
                 )
             return
@@ -1387,7 +2234,7 @@ def handle_text_message(event):
                 print(f"[DEBUG] Translation sent successfully")
 
                 # Save to Notion
-                save_to_notion(
+                save_to_gdrive(
                     title=f"翻譯：{text_to_translate[:50]}...",
                     content_type="翻譯",
                     category="翻譯",
@@ -1401,7 +2248,7 @@ def handle_text_message(event):
                 line_bot_api.reply_message_with_http_info(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
-                        messages=[TextMessage(text=f"❌ 翻譯失敗：{str(e)}")],
+                        messages=[TextMessage(text="❌ 翻譯失敗，請稍後再試")],
                     )
                 )
             return
@@ -1473,7 +2320,7 @@ def handle_text_message(event):
 
                         post_url = post_data.get("url") or post_data.get("postUrl") or url
 
-                        if save_social_to_notion(
+                        if save_social_to_gdrive(
                             platform=platform_name,
                             username=normalized_data.get("username", "未知"),
                             summary=parsed.get("summary", ""),
@@ -1569,7 +2416,7 @@ def handle_text_message(event):
                     post_url = post_data.get("url") or post_data.get("postUrl") or url
 
                     # Save to Notion
-                    if save_social_to_notion(
+                    if save_social_to_gdrive(
                         platform=platform_name,
                         username=normalized_data.get("username", "未知"),
                         summary=parsed.get("summary", ""),
@@ -1686,7 +2533,7 @@ def handle_text_message(event):
                     print(f"[DEBUG] Social post analysis sent successfully")
 
                     # Save to Notion
-                    save_social_to_notion(
+                    save_social_to_gdrive(
                         platform=platform_name,
                         username=normalized_data.get("username", "未知"),
                         summary=parsed.get("summary", ""),
@@ -1703,62 +2550,87 @@ def handle_text_message(event):
                     )
                     return
 
-                # Priority 2: Check if it's a Google Maps URL
+                # Priority 2+3: Google Maps or general webpage
                 is_google_maps = any(pattern in url.lower() for pattern in [
                     'maps.google.com', 'google.com/maps', 'goo.gl/maps',
                     'maps.app.goo.gl', '/maps/', 'maps.app'
                 ])
 
-                if is_google_maps:
-                    print(f"[DEBUG] Detected Google Maps URL, trying Apify scraper first...")
-                    # Resolve short URLs (e.g., maps.app.goo.gl/xxx -> full Google Maps URL)
-                    resolved_url = resolve_short_url(url)
-                    place_data = scrape_google_maps(resolved_url)
-                    if place_data:
-                        scraped_info = format_google_maps_result(place_data)
-                        # Use OpenAI to enhance the scraped data with analysis
-                        summary = summarize_google_maps(scraped_info, resolved_url)
-                    else:
-                        # Fallback to webpage scraping with resolved URL
-                        print(f"[DEBUG] Apify scraper failed, falling back to webpage fetch...")
-                        content = fetch_webpage_content(resolved_url)
-                        print(f"[DEBUG] Maps content length: {len(content)}")
-                        summary = summarize_google_maps(content, resolved_url)
-                else:
-                    # Priority 3: General webpage
-                    print(f"[DEBUG] Fetching webpage content...")
-                    content = fetch_webpage_content(url)
-                    print(f"[DEBUG] Content length: {len(content)}")
-
-                    print(f"[DEBUG] Generating webpage summary...")
-                    summary = summarize_webpage(content)
-                print(f"[DEBUG] Summary: {summary[:100]}...")
-
+                # Send immediate waiting message (Jina AI + GPT can take 10-20s)
                 line_bot_api.reply_message_with_http_info(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
-                        messages=[TextMessage(text=f"🔗 網頁摘要\n{url}\n\n{summary}")],
+                        messages=[TextMessage(text=f"🔗 正在讀取網頁摘要...\n（通常需要 10-20 秒）")]
                     )
                 )
-                print(f"[DEBUG] Reply sent successfully")
 
-                # Save to Notion
-                parsed = parse_summary_response(summary)
-                save_to_notion(
-                    title=parsed["title"] or url[:50],
-                    content_type="URL摘要",
-                    category=parsed["category"],
-                    content=summary,
-                    source_url=url,
-                    keywords=parsed["keywords"],
-                    user_id=user_id
-                )
+                def _process_url_async(uid, u, maps):
+                    try:
+                        if maps:
+                            print(f"[DEBUG] Detected Google Maps URL, trying Apify scraper first...")
+                            resolved_url = resolve_short_url(u)
+                            place_data = scrape_google_maps(resolved_url)
+                            if place_data:
+                                scraped_info = format_google_maps_result(place_data)
+                                page_summary = summarize_google_maps(scraped_info, resolved_url)
+                            else:
+                                print(f"[DEBUG] Apify scraper failed, falling back to webpage fetch...")
+                                page_content = fetch_webpage_content(resolved_url)
+                                page_summary = summarize_google_maps(page_content, resolved_url)
+                        else:
+                            print(f"[DEBUG] Fetching webpage content...")
+                            page_content = fetch_webpage_content(u)
+                            print(f"[DEBUG] Content length: {len(page_content)}")
+                            page_summary = summarize_webpage(page_content)
+
+                        print(f"[DEBUG] Summary: {page_summary[:100]}...")
+                        parsed_url = parse_summary_response(page_summary)
+                        title = parsed_url["title"] or u[:50]
+                        fid = save_to_gdrive(
+                            title=title,
+                            content_type="URL摘要",
+                            category=parsed_url["category"],
+                            content=page_summary,
+                            source_url=u,
+                            keywords=parsed_url["keywords"],
+                            user_id=uid
+                        )
+                        if fid:
+                            user_last_file[uid] = {"file_id": fid, "title": title, "saved_at": time.time()}
+
+                        with ApiClient(configuration) as push_client:
+                            push_api = MessagingApi(push_client)
+                            push_api.push_message(PushMessageRequest(
+                                to=uid,
+                                messages=[TextMessage(
+                                    text=f"🔗 網頁摘要\n{u}\n\n{page_summary}",
+                                    quick_reply=QuickReply(items=[
+                                        QuickReplyItem(action=MessageAction(label="💭 補充想法", text="補充想法：")),
+                                        QuickReplyItem(action=MessageAction(label="📚 今日回顧", text="今日回顧")),
+                                        QuickReplyItem(action=MessageAction(label="⭐ 標記重要", text="補充想法：⭐ 重要")),
+                                    ])
+                                )]
+                            ))
+                        print(f"[DEBUG] URL summary pushed successfully")
+                    except Exception as ex:
+                        print(f"[DEBUG] Async URL error: {str(ex)}")
+                        try:
+                            with ApiClient(configuration) as push_client:
+                                push_api = MessagingApi(push_client)
+                                push_api.push_message(PushMessageRequest(
+                                    to=uid,
+                                    messages=[TextMessage(text="❌ 無法讀取網頁，請確認網址是否正確")]
+                                ))
+                        except Exception:
+                            pass
+
+                threading.Thread(target=_process_url_async, args=(user_id, url, is_google_maps), daemon=True).start()
             except Exception as e:
                 print(f"[DEBUG] Error: {str(e)}")
                 line_bot_api.reply_message_with_http_info(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
-                        messages=[TextMessage(text=f"❌ 網頁摘要失敗：{str(e)}")],
+                        messages=[TextMessage(text="❌ 處理失敗，請稍後再試")],
                     )
                 )
         else:
@@ -1769,16 +2641,35 @@ def handle_text_message(event):
                 line_bot_api.reply_message_with_http_info(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
-                        messages=[TextMessage(text=f"📝 文字摘要\n\n{summary}")],
+                        messages=[TextMessage(
+                            text=f"📝 文字摘要\n\n{summary}",
+                            quick_reply=QuickReply(items=[
+                                QuickReplyItem(action=MessageAction(label="💭 補充想法", text="補充想法：")),
+                                QuickReplyItem(action=MessageAction(label="📚 今日回顧", text="今日回顧")),
+                                QuickReplyItem(action=MessageAction(label="⭐ 標記重要", text="補充想法：⭐ 重要")),
+                            ])
+                        )],
                     )
                 )
+                parsed = parse_summary_response(summary)
+                title = parsed["title"] or text[:30]
+                file_id = save_to_gdrive(
+                    title=title,
+                    content_type="文字筆記",
+                    category=parsed["category"],
+                    content=f"{summary}\n\n## 原始輸入\n{text}",
+                    keywords=parsed["keywords"],
+                    user_id=user_id
+                )
+                if file_id:
+                    user_last_file[user_id] = {"file_id": file_id, "title": title, "saved_at": time.time()}
                 print(f"[DEBUG] Text summary sent successfully")
             except Exception as e:
                 print(f"[DEBUG] Error: {str(e)}")
                 line_bot_api.reply_message_with_http_info(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
-                        messages=[TextMessage(text=f"❌ 文字摘要失敗：{str(e)}")],
+                        messages=[TextMessage(text="❌ 摘要失敗，請稍後再試")],
                     )
                 )
 
@@ -1800,7 +2691,7 @@ def analyze_image(image_data: bytes) -> str:
         base64_image = base64.b64encode(image_data).decode("utf-8")
 
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             messages=[
                 {
                     "role": "system",
@@ -1859,7 +2750,7 @@ def translate_image_text(image_data: bytes, target_language: str) -> str:
         base64_image = base64.b64encode(image_data).decode("utf-8")
 
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             messages=[
                 {
                     "role": "system",
@@ -1947,7 +2838,7 @@ def handle_image_message(event):
                 )
 
                 # Save to Notion
-                save_to_notion(
+                save_to_gdrive(
                     title=f"圖片翻譯：{target_language}",
                     content_type="翻譯",
                     category="翻譯",
@@ -1959,32 +2850,41 @@ def handle_image_message(event):
 
             # Normal image analysis
             result = analyze_image(image_data)
+            parsed = parse_summary_response(result)
+            title = parsed["title"] or "圖片分析"
 
             line_bot_api.reply_message_with_http_info(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
-                    messages=[TextMessage(text=f"🖼️ 圖片分析\n\n{result}")],
+                    messages=[TextMessage(
+                        text=f"🖼️ 圖片分析\n\n{result}",
+                        quick_reply=QuickReply(items=[
+                            QuickReplyItem(action=MessageAction(label="💭 補充想法", text="補充想法：")),
+                            QuickReplyItem(action=MessageAction(label="📚 今日回顧", text="今日回顧")),
+                            QuickReplyItem(action=MessageAction(label="⭐ 標記重要", text="補充想法：⭐ 重要")),
+                        ])
+                    )],
                 )
             )
             print(f"[DEBUG] Image analysis sent successfully")
 
-            # Save to Notion
-            parsed = parse_summary_response(result)
-            save_to_notion(
-                title=parsed["title"] or "圖片分析",
+            fid = save_to_gdrive(
+                title=title,
                 content_type="圖片分析",
                 category=parsed["category"],
                 content=result,
                 keywords=parsed["keywords"],
                 user_id=user_id
             )
+            if fid:
+                user_last_file[user_id] = {"file_id": fid, "title": title, "saved_at": time.time()}
 
         except Exception as e:
             print(f"[DEBUG] Image processing error: {str(e)}")
             line_bot_api.reply_message_with_http_info(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
-                    messages=[TextMessage(text=f"圖片處理失敗：{str(e)}")],
+                    messages=[TextMessage(text="❌ 圖片分析失敗，請稍後再試")],
                 )
             )
 
@@ -2045,23 +2945,37 @@ def handle_audio_message(event):
                 )
                 return
 
-            # Reply with transcription
+            # Auto-analyze transcription (same pipeline as text input)
+            summary = summarize_text(result_text)
+
+            reply_text = f"🎙️ 語音筆記\n\n{summary}\n\n─────────\n原始語音：{result_text[:100]}{'...' if len(result_text) > 100 else ''}"
+
             line_bot_api.reply_message_with_http_info(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
-                    messages=[TextMessage(text=f"📝 語音轉文字：\n\n{result_text}")],
+                    messages=[TextMessage(
+                        text=reply_text,
+                        quick_reply=QuickReply(items=[
+                            QuickReplyItem(action=MessageAction(label="💭 補充想法", text="補充想法：")),
+                            QuickReplyItem(action=MessageAction(label="✅ 完成", text="完成")),
+                        ])
+                    )],
                 )
             )
 
-            # Save to Notion
             user_id = event.source.user_id
-            save_to_notion(
-                title=f"語音轉文字：{result_text[:50]}...",
-                content_type="語音轉文字",
-                category="筆記",
-                content=result_text,
+            parsed = parse_summary_response(summary)
+            title = parsed["title"] or f"語音筆記：{result_text[:30]}"
+            fid = save_to_gdrive(
+                title=title,
+                content_type="語音筆記",
+                category=parsed["category"],
+                content=f"{summary}\n\n## 原始語音\n{result_text}",
+                keywords=parsed["keywords"],
                 user_id=user_id
             )
+            if fid:
+                user_last_file[user_id] = {"file_id": fid, "title": title, "saved_at": time.time()}
 
         except Exception as e:
             # Clean up temp file if exists
@@ -2071,20 +2985,13 @@ def handle_audio_message(event):
                 except:
                     pass
 
+            print(f"[DEBUG] Audio processing error: {str(e)}")
             line_bot_api.reply_message_with_http_info(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
-                    messages=[TextMessage(text=f"語音轉文字失敗：{str(e)}")],
+                    messages=[TextMessage(text="❌ 語音處理失敗，請稍後再試")],
                 )
             )
-
-
-# Initialize Notion social database on startup
-if notion_client and NOTION_SOCIAL_DATABASE_ID:
-    try:
-        setup_notion_social_database()
-    except Exception as e:
-        print(f"[DEBUG] Social database init error: {str(e)}")
 
 
 if __name__ == "__main__":
