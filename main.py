@@ -49,6 +49,7 @@ APIFY_API_KEY = os.getenv("APIFY_API_KEY")
 GDRIVE_CREDENTIALS_FILE = os.getenv("GDRIVE_CREDENTIALS_FILE", "gdrive_credentials.json")
 GDRIVE_VAULT_FOLDER_ID = os.getenv("GDRIVE_VAULT_FOLDER_ID")
 GOOGLE_CALENDAR_IDS = [cid.strip() for cid in os.getenv("GOOGLE_CALENDAR_ID", "primary").split(",") if cid.strip()]
+CRON_SECRET = os.getenv("CRON_SECRET")
 
 if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET:
     raise ValueError("Please set LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET in .env file")
@@ -1119,6 +1120,112 @@ def get_today_events() -> list:
         return []
 
 
+def parse_contact_from_text(text: str) -> dict | None:
+    """Use AI to parse natural language into structured contact info"""
+    if not openai_client:
+        return None
+    try:
+        import json as _json
+        response = openai_client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[{
+                "role": "user",
+                "content": f"""請從以下文字提取人脈聯絡人資訊，用 JSON 格式回覆（只回 JSON，不要加說明）：
+
+文字：{text}
+
+格式：
+{{
+  "name": "姓名（必填，若無法識別則填 null）",
+  "relation": "關係，例如：朋友/同事/客戶/家人/合作夥伴/其他",
+  "company": "公司或單位",
+  "role": "職位",
+  "phone": "電話",
+  "email": "Email",
+  "line_id": "LINE ID",
+  "notes": "認識方式、興趣、特徵或其他備註",
+  "tags": ["標籤1", "標籤2"]
+}}
+
+規則：
+- 找不到的欄位填空字串 ""（tags 填 []）
+- name 是必填，若文字中沒有明顯的人名，name 填 null
+- tags 從文字推斷出 1-4 個關鍵字（例如：投資、AI、台北、創業）
+"""
+            }],
+            max_tokens=400,
+            temperature=0.1
+        )
+        raw = response.choices[0].message.content.strip()
+        raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=re.MULTILINE)
+        data = _json.loads(raw)
+        if not data.get("name"):
+            return None
+        return data
+    except Exception as e:
+        print(f"[DEBUG] Parse contact error: {str(e)}")
+        return None
+
+
+def save_contact_to_wiki(contact: dict) -> str | None:
+    """Save contact info as a Wiki/People/{name}.md page"""
+    if not GDRIVE_VAULT_FOLDER_ID:
+        print("[DEBUG] GDRIVE_VAULT_FOLDER_ID not set, skipping contact save")
+        return None
+    name = contact.get("name", "").strip()
+    if not name:
+        return None
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    tags = ["人脈"]
+    if contact.get("relation"):
+        tags.append(contact["relation"])
+    if contact.get("tags"):
+        tags.extend([t for t in contact["tags"] if t])
+
+    frontmatter_lines = [
+        "---",
+        f"date: {today}",
+        "type: 人脈",
+        f"name: {name}",
+    ]
+    if contact.get("relation"):
+        frontmatter_lines.append(f"relation: {contact['relation']}")
+    if contact.get("company"):
+        frontmatter_lines.append(f"company: {contact['company']}")
+    frontmatter_lines.append(f"tags: [{', '.join(tags)}]")
+    frontmatter_lines.append("---\n")
+    frontmatter = "\n".join(frontmatter_lines)
+
+    body_lines = [f"# {name}\n"]
+    info_pairs = [
+        ("關係", contact.get("relation")),
+        ("公司", contact.get("company")),
+        ("職位", contact.get("role")),
+        ("電話", contact.get("phone")),
+        ("Email", contact.get("email")),
+        ("LINE ID", contact.get("line_id")),
+    ]
+    info_lines = [f"- **{label}**：{value}" for label, value in info_pairs if value]
+    if info_lines:
+        body_lines.append("## 基本資料\n")
+        body_lines.extend(info_lines)
+        body_lines.append("")
+
+    if contact.get("notes"):
+        body_lines.append("## 備註\n")
+        body_lines.append(contact["notes"])
+        body_lines.append("")
+
+    body_lines.append("## 互動記錄\n")
+    body_lines.append(f"- {today}：建立聯絡人")
+
+    full_content = frontmatter + "\n" + "\n".join(body_lines) + "\n"
+
+    # Reuse save_wiki_page (saves under Wiki/People/) – it handles update vs create
+    return save_wiki_page(name, full_content, subfolder="People")
+
+
 def get_or_create_folder(service, folder_name: str, parent_id: str) -> str:
     """Get existing folder or create it if not found"""
     safe_name = folder_name.replace("'", "\\'")
@@ -1545,6 +1652,62 @@ def answer_from_knowledge_base(question: str, wiki_docs: list[tuple], source_doc
         return ""
 
 
+def run_consolidate_sources(month_str: str = None) -> dict:
+    """Core logic for consolidating Sources into Wiki pages.
+    Used by both 整理筆記 command and weekly cron job. Returns summary dict."""
+    if not month_str:
+        month_str = datetime.now().strftime("%Y-%m")
+
+    files = list_sources_files_by_month(month_str, limit=80)
+    if not files:
+        return {"month": month_str, "total": 0, "consolidated": [], "skipped": []}
+
+    category_files: dict[str, list[tuple[str, str]]] = {}
+    for f in files:
+        content = read_gdrive_file(f['id'])
+        if not content:
+            continue
+        cat = extract_frontmatter_category(content)
+        if cat not in category_files:
+            category_files[cat] = []
+        category_files[cat].append((f['name'], content))
+
+    consolidated = []
+    skipped = []
+    for cat, cat_files in sorted(category_files.items(), key=lambda x: -len(x[1])):
+        if len(cat_files) >= 3:
+            texts = [c for _, c in cat_files]
+            wiki_content = consolidate_sources_to_wiki(cat, texts)
+            if wiki_content:
+                save_wiki_page(cat, wiki_content)
+                consolidated.append(f"{cat}（{len(cat_files)} 篇）")
+        else:
+            skipped.append(f"{cat}（{len(cat_files)} 篇）")
+
+    log_id = find_vault_file("log.md")
+    if log_id:
+        log_content = read_gdrive_file(log_id) or ""
+        log_entry = f"\n\n## {datetime.now().strftime('%Y-%m-%d')} — 月度整理\n\n"
+        log_entry += f"- 本月 Sources：{len(files)} 篇\n"
+        for line in consolidated:
+            log_entry += f"- 整合 Wiki：✅ {line}\n"
+        if skipped:
+            log_entry += f"- 待累積：{', '.join(skipped)}\n"
+        insert_pos = log_content.find('\n\n---')
+        if insert_pos >= 0:
+            new_log = log_content[:insert_pos] + log_entry + log_content[insert_pos:]
+        else:
+            new_log = log_content + log_entry
+        update_gdrive_file_content(log_id, new_log)
+
+    return {
+        "month": month_str,
+        "total": len(files),
+        "consolidated": consolidated,
+        "skipped": skipped,
+    }
+
+
 def save_social_to_gdrive(
     platform: str,
     username: str,
@@ -1590,6 +1753,40 @@ def callback():
         abort(400)
 
     return "OK"
+
+
+@app.route("/healthz", methods=["GET"])
+def healthz():
+    """Health check endpoint for Zeabur"""
+    return {"status": "ok", "ts": datetime.now().isoformat()}, 200
+
+
+@app.route("/cron/weekly", methods=["POST", "GET"])
+def cron_weekly():
+    """Weekly cron job: consolidate Sources → Wiki pages.
+    Authenticated via X-Cron-Secret header or ?secret= query param.
+    Set CRON_SECRET env var on Zeabur and configure a Cron Job to hit this URL weekly."""
+    if not CRON_SECRET:
+        return {"error": "CRON_SECRET not configured"}, 503
+
+    provided = request.headers.get("X-Cron-Secret") or request.args.get("secret", "")
+    if provided != CRON_SECRET:
+        return {"error": "unauthorized"}, 401
+
+    try:
+        result = run_consolidate_sources()
+        print(f"[CRON] weekly consolidation done: {result}")
+        return {
+            "status": "ok",
+            "month": result["month"],
+            "total_sources": result["total"],
+            "wiki_pages_created": len(result["consolidated"]),
+            "consolidated": result["consolidated"],
+            "skipped": result["skipped"],
+        }, 200
+    except Exception as e:
+        print(f"[CRON] weekly consolidation error: {str(e)}")
+        return {"status": "error", "message": str(e)}, 500
 
 
 def translate_text(text: str, target_language: str) -> str:
@@ -1800,9 +1997,9 @@ def handle_text_message(event):
 
             def _consolidate_async(uid):
                 try:
-                    month_str = datetime.now().strftime("%Y-%m")
-                    files = list_sources_files_by_month(month_str, limit=80)
-                    if not files:
+                    result = run_consolidate_sources()
+                    month_str = result["month"]
+                    if result["total"] == 0:
                         with ApiClient(configuration) as push_client:
                             MessagingApi(push_client).push_message(PushMessageRequest(
                                 to=uid,
@@ -1810,56 +2007,14 @@ def handle_text_message(event):
                             ))
                         return
 
-                    # Read all files and group by category
-                    category_files: dict[str, list[tuple[str, str]]] = {}
-                    for f in files:
-                        content = read_gdrive_file(f['id'])
-                        if not content:
-                            continue
-                        cat = extract_frontmatter_category(content)
-                        if cat not in category_files:
-                            category_files[cat] = []
-                        category_files[cat].append((f['name'], content))
-
-                    # Consolidate categories with 3+ files
-                    consolidated = []
-                    skipped = []
-                    for cat, cat_files in sorted(category_files.items(), key=lambda x: -len(x[1])):
-                        if len(cat_files) >= 3:
-                            texts = [c for _, c in cat_files]
-                            wiki_content = consolidate_sources_to_wiki(cat, texts)
-                            if wiki_content:
-                                save_wiki_page(cat, wiki_content)
-                                consolidated.append(f"✅ {cat}（{len(cat_files)} 篇）")
-                        else:
-                            skipped.append(f"⏳ {cat}（{len(cat_files)} 篇，未達 3 篇）")
-
-                    # Append to log.md
-                    log_id = find_vault_file("log.md")
-                    if log_id:
-                        log_content = read_gdrive_file(log_id)
-                        log_entry = f"\n\n## {datetime.now().strftime('%Y-%m-%d')} — 月度整理\n\n"
-                        log_entry += f"- 本月 Sources：{len(files)} 篇\n"
-                        for line in consolidated:
-                            log_entry += f"- 整合 Wiki：{line}\n"
-                        if skipped:
-                            log_entry += f"- 待累積：{', '.join(skipped)}\n"
-                        insert_pos = log_content.find('\n\n---')
-                        if insert_pos >= 0:
-                            new_log = log_content[:insert_pos] + log_entry + log_content[insert_pos:]
-                        else:
-                            new_log = log_content + log_entry
-                        update_gdrive_file_content(log_id, new_log)
-
-                    # Build reply
                     summary_lines = [f"📚 整理完成（{month_str}）\n"]
-                    summary_lines.append(f"共 {len(files)} 篇筆記 → {len(consolidated)} 個 Wiki 頁面\n")
-                    if consolidated:
+                    summary_lines.append(f"共 {result['total']} 篇筆記 → {len(result['consolidated'])} 個 Wiki 頁面\n")
+                    if result["consolidated"]:
                         summary_lines.append("已生成 Wiki：")
-                        summary_lines.extend(consolidated)
-                    if skipped:
+                        summary_lines.extend(f"✅ {line}" for line in result["consolidated"])
+                    if result["skipped"]:
                         summary_lines.append("\n待累積（未達 3 篇）：")
-                        summary_lines.extend(skipped)
+                        summary_lines.extend(f"⏳ {line}" for line in result["skipped"])
                     result_text = "\n".join(summary_lines)
 
                     with ApiClient(configuration) as push_client:
@@ -1900,11 +2055,22 @@ def handle_text_message(event):
                     tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
                     start = f"{tomorrow}T00:00:00+08:00"
                     end = f"{tomorrow}T23:59:59+08:00"
-                    result = service.events().list(
-                        calendarId=GOOGLE_CALENDAR_ID, timeMin=start, timeMax=end,
-                        maxResults=10, singleEvents=True, orderBy='startTime'
-                    ).execute()
-                    events = result.get('items', [])
+                    events = []
+                    seen_keys = set()
+                    for cal_id in GOOGLE_CALENDAR_IDS:
+                        try:
+                            result = service.events().list(
+                                calendarId=cal_id, timeMin=start, timeMax=end,
+                                maxResults=10, singleEvents=True, orderBy='startTime'
+                            ).execute()
+                            for evt in result.get('items', []):
+                                key = (evt.get('summary', ''), evt.get('start', {}).get('dateTime', evt.get('start', {}).get('date', '')))
+                                if key not in seen_keys:
+                                    seen_keys.add(key)
+                                    events.append(evt)
+                        except Exception as ce:
+                            print(f"[DEBUG] List tomorrow events error in {cal_id}: {str(ce)}")
+                    events.sort(key=lambda e: e['start'].get('dateTime', e['start'].get('date', '')))
                     reply = format_event_list(events, "明天的")
                 except Exception:
                     reply = "❌ 無法取得行程，請確認行事曆已設定"
@@ -1987,6 +2153,73 @@ def handle_text_message(event):
                         pass
 
             threading.Thread(target=_add_event_async, args=(user_id, event_text), daemon=True).start()
+            return
+
+        # 加聯絡人指令：解析自然語言 → 存到 Wiki/People/
+        add_contact_match = re.match(r'^(?:加聯絡人|新增聯絡人|記聯絡人|加人脈)[：:]\s*(.+)$', text.strip())
+        if add_contact_match:
+            contact_text = add_contact_match.group(1).strip()
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(reply_token=event.reply_token,
+                    messages=[TextMessage(text=f"👤 正在新增聯絡人...\n「{contact_text[:60]}」")])
+            )
+
+            def _add_contact_async(uid, ct_text):
+                try:
+                    parsed = parse_contact_from_text(ct_text)
+                    if not parsed:
+                        with ApiClient(configuration) as push_client:
+                            MessagingApi(push_client).push_message(PushMessageRequest(
+                                to=uid,
+                                messages=[TextMessage(text="❌ 無法解析聯絡人資訊\n\n試試這個格式：\n加聯絡人：Jason 同事 ABC 公司工程師 0912345678 在 AWS 大會認識")]
+                            ))
+                        return
+
+                    file_id = save_contact_to_wiki(parsed)
+                    if not file_id:
+                        with ApiClient(configuration) as push_client:
+                            MessagingApi(push_client).push_message(PushMessageRequest(
+                                to=uid, messages=[TextMessage(text="❌ 聯絡人儲存失敗，請稍後再試")]
+                            ))
+                        return
+
+                    info_lines = [f"✅ 已加入人脈資料庫\n", f"👤 {parsed['name']}"]
+                    if parsed.get("relation"):
+                        info_lines.append(f"🤝 {parsed['relation']}")
+                    if parsed.get("company"):
+                        company = parsed["company"]
+                        if parsed.get("role"):
+                            company += f"・{parsed['role']}"
+                        info_lines.append(f"🏢 {company}")
+                    if parsed.get("phone"):
+                        info_lines.append(f"📞 {parsed['phone']}")
+                    if parsed.get("email"):
+                        info_lines.append(f"✉️ {parsed['email']}")
+                    if parsed.get("notes"):
+                        info_lines.append(f"📝 {parsed['notes'][:80]}")
+
+                    with ApiClient(configuration) as push_client:
+                        MessagingApi(push_client).push_message(PushMessageRequest(
+                            to=uid,
+                            messages=[TextMessage(
+                                text="\n".join(info_lines),
+                                quick_reply=QuickReply(items=[
+                                    QuickReplyItem(action=MessageAction(label="再加一位", text="加聯絡人：")),
+                                    QuickReplyItem(action=MessageAction(label="🔍 搜尋人脈", text="查 ")),
+                                ])
+                            )]
+                        ))
+                except Exception as ex:
+                    print(f"[DEBUG] Add contact async error: {str(ex)}")
+                    try:
+                        with ApiClient(configuration) as push_client:
+                            MessagingApi(push_client).push_message(PushMessageRequest(
+                                to=uid, messages=[TextMessage(text="❌ 新增聯絡人失敗，請稍後再試")]
+                            ))
+                    except Exception:
+                        pass
+
+            threading.Thread(target=_add_contact_async, args=(user_id, contact_text), daemon=True).start()
             return
 
         # 問 XXX 指令：根據個人知識庫回答問題

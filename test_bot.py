@@ -751,8 +751,9 @@ class TestFetchWebpageContent:
 
     @patch("main.requests.get")
     def test_fetch_page_strips_scripts(self, mock_get):
-        mock_response = MagicMock()
-        mock_response.text = """
+        # 第一次 call (Jina AI) 失敗，第二次走 fallback 才會用 BeautifulSoup 過濾 <script>
+        fallback_response = MagicMock()
+        fallback_response.text = """
         <html>
             <head><title>Page</title></head>
             <body>
@@ -761,28 +762,27 @@ class TestFetchWebpageContent:
             </body>
         </html>
         """
-        mock_response.raise_for_status = MagicMock()
-        mock_get.return_value = mock_response
+        fallback_response.raise_for_status = MagicMock()
+        mock_get.side_effect = [Exception("Jina down"), fallback_response]
 
         result = main.fetch_webpage_content("https://example.com")
         assert "alert" not in result
+        assert "actual content" in result
 
 
 # ============================================================
 # 12. Notion 儲存功能測試（使用 mock）
 # ============================================================
 
-class TestSaveToNotion:
-    """測試 Notion 儲存功能"""
+class TestSaveToGDrive:
+    """測試 Google Drive 儲存功能（取代舊的 Notion 儲存）"""
 
-    def test_save_without_notion_configured(self):
-        """Notion 未設定時應回傳 False"""
-        original_client = main.notion_client
-        original_db = main.NOTION_DATABASE_ID
-        main.notion_client = None
-        main.NOTION_DATABASE_ID = None
+    def test_save_without_vault_configured(self):
+        """GDRIVE_VAULT_FOLDER_ID 未設定時應回傳 False"""
+        original = main.GDRIVE_VAULT_FOLDER_ID
+        main.GDRIVE_VAULT_FOLDER_ID = None
 
-        result = main.save_to_notion(
+        result = main.save_to_gdrive(
             title="Test",
             content_type="URL摘要",
             category="科技",
@@ -790,15 +790,14 @@ class TestSaveToNotion:
         )
         assert result is False
 
-        main.notion_client = original_client
-        main.NOTION_DATABASE_ID = original_db
+        main.GDRIVE_VAULT_FOLDER_ID = original
 
-    def test_save_social_without_notion(self):
-        """Notion 未設定時社群儲存應回傳 False"""
-        original_client = main.notion_client
-        main.notion_client = None
+    def test_save_social_without_vault_configured(self):
+        """GDRIVE_VAULT_FOLDER_ID 未設定時社群儲存應回傳 False"""
+        original = main.GDRIVE_VAULT_FOLDER_ID
+        main.GDRIVE_VAULT_FOLDER_ID = None
 
-        result = main.save_social_to_notion(
+        result = main.save_social_to_gdrive(
             platform="Facebook",
             username="test",
             summary="test summary",
@@ -811,7 +810,7 @@ class TestSaveToNotion:
         )
         assert result is False
 
-        main.notion_client = original_client
+        main.GDRIVE_VAULT_FOLDER_ID = original
 
 
 # ============================================================
@@ -1414,6 +1413,277 @@ class TestImageAnalysis:
         """ImageMessageContent 應已被 import"""
         from linebot.v3.webhooks import ImageMessageContent
         assert ImageMessageContent is not None
+
+
+class TestParseContactFromText:
+    """測試聯絡人自然語言解析"""
+
+    def test_parse_contact_without_openai(self):
+        original = main.openai_client
+        main.openai_client = None
+        result = main.parse_contact_from_text("Jason 同事")
+        assert result is None
+        main.openai_client = original
+
+    @patch("main.openai_client")
+    def test_parse_contact_success(self, mock_client):
+        main.openai_client = mock_client
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps({
+            "name": "Jason",
+            "relation": "同事",
+            "company": "ABC 公司",
+            "role": "工程師",
+            "phone": "0912345678",
+            "email": "",
+            "line_id": "",
+            "notes": "在 AWS 大會認識",
+            "tags": ["AI", "工程師"]
+        })
+        mock_client.chat.completions.create.return_value = mock_response
+
+        result = main.parse_contact_from_text("Jason 同事 ABC 公司工程師 0912345678 在 AWS 大會認識")
+        assert result is not None
+        assert result["name"] == "Jason"
+        assert result["relation"] == "同事"
+        assert result["phone"] == "0912345678"
+        assert "AI" in result["tags"]
+
+    @patch("main.openai_client")
+    def test_parse_contact_no_name_returns_none(self, mock_client):
+        main.openai_client = mock_client
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps({"name": None})
+        mock_client.chat.completions.create.return_value = mock_response
+
+        assert main.parse_contact_from_text("一些隨便的文字") is None
+
+    @patch("main.openai_client")
+    def test_parse_contact_strips_markdown_fences(self, mock_client):
+        main.openai_client = mock_client
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = (
+            "```json\n" + json.dumps({"name": "小華", "relation": "朋友", "tags": []}) + "\n```"
+        )
+        mock_client.chat.completions.create.return_value = mock_response
+        result = main.parse_contact_from_text("小華 是朋友")
+        assert result["name"] == "小華"
+
+
+class TestSaveContactToWiki:
+    """測試聯絡人存入 Wiki/People/"""
+
+    def test_save_contact_without_vault_id(self):
+        original = main.GDRIVE_VAULT_FOLDER_ID
+        main.GDRIVE_VAULT_FOLDER_ID = None
+        result = main.save_contact_to_wiki({"name": "Jason"})
+        assert result is None
+        main.GDRIVE_VAULT_FOLDER_ID = original
+
+    def test_save_contact_without_name_returns_none(self):
+        original = main.GDRIVE_VAULT_FOLDER_ID
+        main.GDRIVE_VAULT_FOLDER_ID = "fake_id"
+        result = main.save_contact_to_wiki({"name": ""})
+        assert result is None
+        main.GDRIVE_VAULT_FOLDER_ID = original
+
+    @patch("main.save_wiki_page")
+    def test_save_contact_calls_save_wiki_with_people_subfolder(self, mock_save):
+        original = main.GDRIVE_VAULT_FOLDER_ID
+        main.GDRIVE_VAULT_FOLDER_ID = "fake_id"
+        mock_save.return_value = "file_xyz"
+
+        contact = {
+            "name": "Jason",
+            "relation": "同事",
+            "company": "ABC 公司",
+            "role": "工程師",
+            "phone": "0912345678",
+            "email": "jason@example.com",
+            "line_id": "jason_line",
+            "notes": "AWS 認識",
+            "tags": ["AI", "雲端"]
+        }
+        result = main.save_contact_to_wiki(contact)
+
+        assert result == "file_xyz"
+        mock_save.assert_called_once()
+        args, kwargs = mock_save.call_args
+        assert args[0] == "Jason"
+        full_content = args[1]
+        assert kwargs.get("subfolder") == "People"
+        # frontmatter
+        assert "type: 人脈" in full_content
+        assert "name: Jason" in full_content
+        assert "relation: 同事" in full_content
+        assert "tags: [人脈, 同事, AI, 雲端]" in full_content
+        # body
+        assert "0912345678" in full_content
+        assert "jason@example.com" in full_content
+        assert "AWS 認識" in full_content
+        assert "互動記錄" in full_content
+
+        main.GDRIVE_VAULT_FOLDER_ID = original
+
+    @patch("main.save_wiki_page")
+    def test_save_contact_minimal_fields(self, mock_save):
+        original = main.GDRIVE_VAULT_FOLDER_ID
+        main.GDRIVE_VAULT_FOLDER_ID = "fake_id"
+        mock_save.return_value = "file_id"
+
+        result = main.save_contact_to_wiki({"name": "小明"})
+        assert result == "file_id"
+        full_content = mock_save.call_args[0][1]
+        assert "name: 小明" in full_content
+        # 沒有電話/email 的欄位不該出現
+        assert "**電話**" not in full_content
+        assert "**Email**" not in full_content
+
+        main.GDRIVE_VAULT_FOLDER_ID = original
+
+
+class TestAddContactCommandRegex:
+    """測試加聯絡人指令的 regex 觸發"""
+
+    def test_add_contact_patterns(self):
+        pattern = r'^(?:加聯絡人|新增聯絡人|記聯絡人|加人脈)[：:]\s*(.+)$'
+        for trigger in ["加聯絡人", "新增聯絡人", "記聯絡人", "加人脈"]:
+            for sep in ["：", ":"]:
+                text = f"{trigger}{sep}Jason 同事"
+                m = re.match(pattern, text)
+                assert m is not None, f"Failed: {text}"
+                assert m.group(1) == "Jason 同事"
+
+    def test_add_contact_no_match_for_other_commands(self):
+        pattern = r'^(?:加聯絡人|新增聯絡人|記聯絡人|加人脈)[：:]\s*(.+)$'
+        assert re.match(pattern, "加行程：開會") is None
+        assert re.match(pattern, "查 投資") is None
+        assert re.match(pattern, "聯絡人") is None  # 沒有冒號
+
+
+class TestRunConsolidateSources:
+    """測試整理筆記核心邏輯（給 cron 與指令共用）"""
+
+    @patch("main.list_sources_files_by_month")
+    def test_run_consolidate_no_files(self, mock_list):
+        mock_list.return_value = []
+        result = main.run_consolidate_sources("2026-04")
+        assert result["total"] == 0
+        assert result["consolidated"] == []
+        assert result["skipped"] == []
+
+    @patch("main.update_gdrive_file_content")
+    @patch("main.find_vault_file")
+    @patch("main.save_wiki_page")
+    @patch("main.consolidate_sources_to_wiki")
+    @patch("main.read_gdrive_file")
+    @patch("main.list_sources_files_by_month")
+    def test_run_consolidate_groups_and_filters(self, mock_list, mock_read,
+                                                 mock_consolidate, mock_save,
+                                                 mock_find, mock_update):
+        mock_list.return_value = [
+            {"id": "f1", "name": "a.md"}, {"id": "f2", "name": "b.md"},
+            {"id": "f3", "name": "c.md"}, {"id": "f4", "name": "d.md"},
+        ]
+        # 三個是 AI 類別（達標），一個是科技（未達標）
+        mock_read.side_effect = [
+            "---\ncategory: AI\n---\nbody1",
+            "---\ncategory: AI\n---\nbody2",
+            "---\ncategory: AI\n---\nbody3",
+            "---\ncategory: 科技\n---\nbody4",
+        ]
+        mock_consolidate.return_value = "# AI Wiki\n內容"
+        mock_find.return_value = None  # 沒有 log.md，跳過更新
+
+        result = main.run_consolidate_sources("2026-04")
+        assert result["total"] == 4
+        assert len(result["consolidated"]) == 1
+        assert "AI" in result["consolidated"][0]
+        assert len(result["skipped"]) == 1
+        assert "科技" in result["skipped"][0]
+        mock_save.assert_called_once_with("AI", "# AI Wiki\n內容")
+
+
+class TestCronWeeklyEndpoint:
+    """測試 /cron/weekly endpoint"""
+
+    def setup_method(self):
+        self.client = main.app.test_client()
+
+    def test_cron_no_secret_configured(self):
+        original = main.CRON_SECRET
+        main.CRON_SECRET = None
+        response = self.client.post("/cron/weekly")
+        assert response.status_code == 503
+        main.CRON_SECRET = original
+
+    def test_cron_unauthorized(self):
+        original = main.CRON_SECRET
+        main.CRON_SECRET = "real_secret"
+        response = self.client.post("/cron/weekly", headers={"X-Cron-Secret": "wrong"})
+        assert response.status_code == 401
+        main.CRON_SECRET = original
+
+    def test_cron_unauthorized_no_header(self):
+        original = main.CRON_SECRET
+        main.CRON_SECRET = "real_secret"
+        response = self.client.post("/cron/weekly")
+        assert response.status_code == 401
+        main.CRON_SECRET = original
+
+    @patch("main.run_consolidate_sources")
+    def test_cron_authorized_via_header(self, mock_run):
+        original = main.CRON_SECRET
+        main.CRON_SECRET = "real_secret"
+        mock_run.return_value = {
+            "month": "2026-04", "total": 5,
+            "consolidated": ["AI（3 篇）"], "skipped": []
+        }
+        response = self.client.post("/cron/weekly", headers={"X-Cron-Secret": "real_secret"})
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["status"] == "ok"
+        assert data["total_sources"] == 5
+        assert data["wiki_pages_created"] == 1
+        main.CRON_SECRET = original
+
+    @patch("main.run_consolidate_sources")
+    def test_cron_authorized_via_query_param(self, mock_run):
+        original = main.CRON_SECRET
+        main.CRON_SECRET = "real_secret"
+        mock_run.return_value = {"month": "2026-04", "total": 0, "consolidated": [], "skipped": []}
+        response = self.client.get("/cron/weekly?secret=real_secret")
+        assert response.status_code == 200
+        main.CRON_SECRET = original
+
+    @patch("main.run_consolidate_sources")
+    def test_cron_handles_internal_error(self, mock_run):
+        original = main.CRON_SECRET
+        main.CRON_SECRET = "real_secret"
+        mock_run.side_effect = Exception("boom")
+        response = self.client.post("/cron/weekly", headers={"X-Cron-Secret": "real_secret"})
+        assert response.status_code == 500
+        data = response.get_json()
+        assert data["status"] == "error"
+        assert "boom" in data["message"]
+        main.CRON_SECRET = original
+
+
+class TestHealthzEndpoint:
+    """測試健康檢查 endpoint"""
+
+    def setup_method(self):
+        self.client = main.app.test_client()
+
+    def test_healthz_ok(self):
+        response = self.client.get("/healthz")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["status"] == "ok"
+        assert "ts" in data
 
 
 if __name__ == "__main__":
