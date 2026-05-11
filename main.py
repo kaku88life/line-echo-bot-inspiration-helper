@@ -1,10 +1,12 @@
 import os
 import re
+import json
 import tempfile
 import time
 import threading
 import base64
 from datetime import datetime, timedelta
+from urllib.parse import parse_qs, urlparse
 from flask import Flask, request, abort
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -254,6 +256,11 @@ CAPTURE_STATUS_FULL = "full"
 CAPTURE_STATUS_PARTIAL = "partial"
 CAPTURE_STATUS_FAILED = "failed"
 
+SOCIAL_EXTRACTOR_BY_PLATFORM = {
+    "facebook": "facebook-apify",
+    "threads": "threads-apify",
+}
+
 FAILED_CONTENT_MARKERS = [
     "無法抓取網頁內容",
     "請提供網頁內容",
@@ -327,6 +334,23 @@ def assess_extracted_content(content: str) -> dict:
     }
 
 
+def assess_url_capture_quality(content: str, source_type: str, extractor: str) -> dict:
+    """Apply source-specific capture quality rules after extraction."""
+    quality = assess_extracted_content(content)
+    if quality["status"] == CAPTURE_STATUS_FAILED:
+        return quality
+
+    if source_type == "youtube":
+        if extractor != "youtube-transcript":
+            return {
+                "status": CAPTURE_STATUS_PARTIAL,
+                "needs_review": True,
+                "reason": "youtube_metadata_only",
+            }
+
+    return quality
+
+
 def build_capture_status_note(
     url: str,
     raw_input: str,
@@ -379,6 +403,91 @@ def source_type_from_url(url: str) -> str:
     if "ptt.cc" in lower:
         return "ptt"
     return "webpage"
+
+
+def should_save_status_note_only(source_type: str, status: str) -> bool:
+    return status == CAPTURE_STATUS_FAILED or (
+        source_type in ["youtube", "google_maps"] and status == CAPTURE_STATUS_PARTIAL
+    )
+
+
+def social_extractor_name(platform: str) -> str:
+    return SOCIAL_EXTRACTOR_BY_PLATFORM.get((platform or "").lower(), "apify")
+
+
+def platform_display_name(platform: str) -> str:
+    platform = (platform or "").lower()
+    if platform == "facebook":
+        return "Facebook"
+    if platform == "threads":
+        return "Threads"
+    return platform.title() if platform else "Social"
+
+
+def assess_social_post_content(post_data: dict) -> dict:
+    """Classify normalized social post quality before AI summarization."""
+    text = "\n".join(
+        part.strip()
+        for part in [
+            str(post_data.get("text") or ""),
+            str(post_data.get("image_text") or ""),
+        ]
+        if str(part or "").strip()
+    )
+    lower = text.lower()
+    images = [img for img in (post_data.get("images") or []) if isinstance(img, str) and img.strip()]
+
+    if any(marker in lower for marker in FAILED_CONTENT_MARKERS):
+        return {
+            "status": CAPTURE_STATUS_FAILED,
+            "needs_review": True,
+            "reason": "fetch_error_marker",
+        }
+
+    compact = re.sub(r'\s+', '', text)
+    if not compact:
+        if images:
+            return {
+                "status": CAPTURE_STATUS_PARTIAL,
+                "needs_review": True,
+                "reason": "media_only",
+            }
+        return {
+            "status": CAPTURE_STATUS_FAILED,
+            "needs_review": True,
+            "reason": "empty_social_content",
+        }
+    if len(compact) < 24:
+        return {
+            "status": CAPTURE_STATUS_PARTIAL,
+            "needs_review": True,
+            "reason": "short_social_content",
+        }
+    return {
+        "status": CAPTURE_STATUS_FULL,
+        "needs_review": False,
+        "reason": "",
+    }
+
+
+def format_social_extracted_content(post_data: dict, source_url: str = "") -> str:
+    """Format normalized social post fields as raw capture content."""
+    lines = [
+        f"帳號：{post_data.get('username') or '未知'}",
+        f"來源：{source_url}",
+        f"互動數據：{post_data.get('likes', 0)} 讚 | {post_data.get('comments', 0)} 留言 | {post_data.get('shares', 0)} 分享",
+        "",
+        "貼文文字：",
+        post_data.get("text") or "（未抓取到文字）",
+    ]
+    image_text = post_data.get("image_text") or ""
+    if image_text:
+        lines.extend(["", "圖片文字：", image_text])
+    images = [img for img in (post_data.get("images") or []) if isinstance(img, str) and img.strip()]
+    if images:
+        lines.extend(["", "圖片連結："])
+        lines.extend(f"- {img}" for img in images[:5])
+    return "\n".join(lines)
 
 
 def resolve_short_url(url: str) -> str:
@@ -587,6 +696,60 @@ def format_google_maps_result(place: dict) -> str:
                 lines.append(f"ℹ️ {key}：{value}")
 
     return "\n".join(lines)
+
+
+def assess_google_maps_place_data(place: dict | None) -> dict:
+    """Classify Google Maps structured data before asking AI to analyze it."""
+    if not isinstance(place, dict) or not place:
+        return {
+            "status": CAPTURE_STATUS_FAILED,
+            "needs_review": True,
+            "reason": "empty_place_data",
+        }
+
+    name = place.get("title") or place.get("name")
+    category = place.get("categoryName") or place.get("category")
+    address = place.get("address") or place.get("street")
+    rating = place.get("totalScore") or place.get("rating") or place.get("stars")
+    phone = place.get("phone") or place.get("phoneUnformatted")
+    website = place.get("website") or place.get("url")
+    price = place.get("price") or place.get("priceLevel")
+    hours = place.get("openingHours")
+    description = place.get("description")
+    location = place.get("location") if isinstance(place.get("location"), dict) else {}
+    has_coords = bool(
+        (location.get("lat") and location.get("lng")) or
+        (place.get("latitude") and place.get("longitude"))
+    )
+    detail_score = sum(bool(value) for value in [
+        category,
+        address,
+        rating,
+        phone,
+        website,
+        price,
+        hours,
+        description,
+        has_coords,
+    ])
+
+    if not name and detail_score < 2:
+        return {
+            "status": CAPTURE_STATUS_FAILED,
+            "needs_review": True,
+            "reason": "insufficient_place_identity",
+        }
+    if detail_score < 2:
+        return {
+            "status": CAPTURE_STATUS_PARTIAL,
+            "needs_review": True,
+            "reason": "limited_place_fields",
+        }
+    return {
+        "status": CAPTURE_STATUS_FULL,
+        "needs_review": False,
+        "reason": "",
+    }
 
 
 def setup_notion_social_database():
@@ -869,8 +1032,150 @@ def fetch_webpage_content(url: str) -> str:
         return f"無法抓取網頁內容：{str(e)}"
 
 
+def extract_youtube_video_id(url: str) -> str:
+    parsed = urlparse(url or "")
+    host = parsed.netloc.lower()
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if host.endswith("youtu.be") and path_parts:
+        return path_parts[0]
+    if "youtube.com" not in host:
+        return ""
+    query = parse_qs(parsed.query)
+    if query.get("v"):
+        return query["v"][0]
+    if len(path_parts) >= 2 and path_parts[0] in ["embed", "shorts", "live"]:
+        return path_parts[1]
+    return ""
+
+
+def extract_balanced_json(text: str, start_index: int) -> str:
+    if start_index < 0 or start_index >= len(text) or text[start_index] != "{":
+        return ""
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start_index, len(text)):
+        char = text[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start_index:index + 1]
+    return ""
+
+
+def extract_yt_initial_player_response(html_text: str) -> dict:
+    marker_match = re.search(r'ytInitialPlayerResponse\s*=', html_text or "")
+    if not marker_match:
+        return {}
+    json_start = (html_text or "").find("{", marker_match.end())
+    json_text = extract_balanced_json(html_text or "", json_start)
+    if not json_text:
+        return {}
+    try:
+        return json.loads(json_text)
+    except Exception as e:
+        print(f"[DEBUG] YouTube player response parse failed: {str(e)}")
+        return {}
+
+
+def choose_youtube_caption_track(player_response: dict) -> dict:
+    tracks = (
+        player_response.get("captions", {})
+        .get("playerCaptionsTracklistRenderer", {})
+        .get("captionTracks", [])
+    )
+    if not isinstance(tracks, list) or not tracks:
+        return {}
+
+    preferred_langs = ["zh-Hant", "zh-TW", "zh-Hans", "zh", "en"]
+
+    def track_score(track: dict) -> tuple[int, int]:
+        lang = track.get("languageCode") or ""
+        try:
+            lang_index = preferred_langs.index(lang)
+        except ValueError:
+            lang_index = len(preferred_langs)
+        is_auto = 1 if track.get("kind") == "asr" else 0
+        return (lang_index, is_auto)
+
+    valid_tracks = [track for track in tracks if isinstance(track, dict) and track.get("baseUrl")]
+    if not valid_tracks:
+        return {}
+    return sorted(valid_tracks, key=track_score)[0]
+
+
+def fetch_youtube_transcript(caption_url: str) -> str:
+    if not caption_url:
+        return ""
+    try:
+        transcript_url = caption_url
+        if "fmt=" not in transcript_url:
+            separator = "&" if "?" in transcript_url else "?"
+            transcript_url = f"{transcript_url}{separator}fmt=json3"
+        response = requests.get(transcript_url, timeout=10)
+        response.raise_for_status()
+        raw_text = response.text
+        lines = []
+        try:
+            payload = response.json()
+            for event in payload.get("events", []):
+                seg_text = "".join(seg.get("utf8", "") for seg in event.get("segs", []) if isinstance(seg, dict))
+                seg_text = re.sub(r'\s+', ' ', seg_text).strip()
+                if seg_text:
+                    lines.append(seg_text)
+        except Exception:
+            soup = BeautifulSoup(raw_text, "html.parser")
+            for item in soup.find_all("text"):
+                seg_text = re.sub(r'\s+', ' ', item.get_text(" ", strip=True)).strip()
+                if seg_text:
+                    lines.append(seg_text)
+        transcript = "\n".join(lines)
+        if len(transcript) > 6000:
+            transcript = transcript[:6000] + "..."
+        return transcript
+    except Exception as e:
+        print(f"[DEBUG] YouTube transcript fetch failed: {str(e)}")
+        return ""
+
+
+def fetch_youtube_page_data(url: str) -> tuple[dict, str]:
+    video_id = extract_youtube_video_id(url)
+    watch_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else url
+    try:
+        response = requests.get(
+            watch_url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return extract_yt_initial_player_response(response.text), response.url
+    except Exception as e:
+        print(f"[DEBUG] YouTube watch page fetch failed: {str(e)}")
+        return {}, watch_url
+
+
 def fetch_youtube_content(url: str) -> tuple[str, str]:
-    """Fetch YouTube metadata via oEmbed. Transcript support can be added later."""
+    """Fetch YouTube metadata and transcript when public captions are available."""
+    metadata = {
+        "title": "",
+        "author_name": "",
+        "author_url": "",
+        "description": "",
+        "publish_date": "",
+        "length_seconds": "",
+    }
     try:
         response = requests.get(
             "https://www.youtube.com/oembed",
@@ -879,18 +1184,58 @@ def fetch_youtube_content(url: str) -> tuple[str, str]:
         )
         response.raise_for_status()
         data = response.json()
-        lines = [
-            f"標題：{data.get('title', '')}",
-            f"頻道：{data.get('author_name', '')}",
-            f"頻道網址：{data.get('author_url', '')}",
-            f"影片網址：{url}",
-            "",
-            "字幕：尚未抓取逐字稿，先保存影片 metadata。",
-        ]
-        return "\n".join(line for line in lines if line is not None), "youtube-oembed"
+        metadata.update({
+            "title": data.get("title", ""),
+            "author_name": data.get("author_name", ""),
+            "author_url": data.get("author_url", ""),
+        })
     except Exception as e:
         print(f"[DEBUG] YouTube metadata fetch failed: {str(e)}")
-        return fetch_webpage_content(url), "jina"
+
+    player_response, canonical_url = fetch_youtube_page_data(url)
+    video_details = player_response.get("videoDetails", {}) if isinstance(player_response.get("videoDetails"), dict) else {}
+    microformat = (
+        player_response.get("microformat", {})
+        .get("playerMicroformatRenderer", {})
+        if isinstance(player_response.get("microformat"), dict)
+        else {}
+    )
+    metadata.update({
+        "title": metadata["title"] or video_details.get("title", ""),
+        "author_name": metadata["author_name"] or video_details.get("author", ""),
+        "description": video_details.get("shortDescription", ""),
+        "publish_date": microformat.get("publishDate", ""),
+        "length_seconds": video_details.get("lengthSeconds", ""),
+    })
+
+    transcript = ""
+    caption_track = choose_youtube_caption_track(player_response)
+    if caption_track:
+        transcript = fetch_youtube_transcript(caption_track.get("baseUrl", ""))
+
+    lines = [
+        f"標題：{metadata['title']}",
+        f"頻道：{metadata['author_name']}",
+        f"頻道網址：{metadata['author_url']}",
+        f"影片網址：{canonical_url or url}",
+    ]
+    if metadata["publish_date"]:
+        lines.append(f"發布日期：{metadata['publish_date']}")
+    if metadata["length_seconds"]:
+        lines.append(f"影片長度秒數：{metadata['length_seconds']}")
+    if metadata["description"]:
+        lines.extend(["", "影片描述：", metadata["description"][:1500]])
+
+    if transcript:
+        lines.extend(["", "逐字稿：", transcript])
+        return "\n".join(line for line in lines if line is not None), "youtube-transcript"
+
+    lines.extend(["", "字幕：尚未抓取逐字稿，先保存影片 metadata。"])
+    content = "\n".join(line for line in lines if line is not None)
+    if metadata["title"] or metadata["author_name"]:
+        return content, "youtube-oembed"
+    fallback = fetch_webpage_content(url)
+    return fallback, "jina"
 
 
 def fetch_ptt_content(url: str) -> tuple[str, str]:
@@ -2117,6 +2462,7 @@ def save_social_to_gdrive(
     extractor: str = "apify",
     needs_review: bool = False,
     raw_input: str = None,
+    normalized_input: str = None,
 ) -> bool:
     """Save social media post as .md file to Google Drive"""
     content = f"{summary}\n\n**互動數據：** {likes} 讚 | {comments} 留言 | {shares} 分享"
@@ -2139,7 +2485,86 @@ def save_social_to_gdrive(
         extractor=extractor,
         needs_review=needs_review,
         raw_input=raw_input or source_url,
+        normalized_input=normalized_input or normalize_input_light(raw_input or source_url),
     )
+
+
+def save_normalized_social_post(
+    platform: str,
+    normalized_data: dict,
+    source_url: str,
+    raw_input: str = None,
+    user_id: str = None,
+) -> tuple[str | bool | None, dict]:
+    """Save a normalized social post, summarizing only when extraction is full."""
+    quality = assess_social_post_content(normalized_data)
+    platform_name = platform_display_name(platform)
+    extractor = social_extractor_name(platform)
+    raw_value = raw_input or source_url
+    normalized_value = normalize_input_light(raw_value)
+
+    if quality["status"] != CAPTURE_STATUS_FULL:
+        extracted_content = format_social_extracted_content(normalized_data, source_url)
+        note = build_capture_status_note(
+            url=source_url,
+            raw_input=raw_value,
+            source_type=platform,
+            extractor=extractor,
+            status=quality["status"],
+            reason=quality["reason"],
+            extracted_content=extracted_content,
+        )
+        fid = save_to_gdrive(
+            title=f"{platform_name} 貼文待確認",
+            content_type="社群分析",
+            category=platform_name,
+            content=note,
+            source_url=source_url,
+            keywords=[platform, "待確認"],
+            user_id=user_id,
+            source_type=platform,
+            capture_status=quality["status"],
+            extractor=extractor,
+            needs_review=True,
+            raw_input=raw_value,
+            normalized_input=normalized_value,
+        )
+        return fid, {
+            "quality": quality,
+            "summary": "貼文內容不足，已存成待確認筆記。",
+            "title": f"{platform_name} 貼文待確認",
+        }
+
+    summary = summarize_social_post(normalized_data, platform)
+    parsed = parse_social_summary_response(summary)
+    summary_text = parsed.get("summary") or summary[:300]
+
+    fid = save_social_to_gdrive(
+        platform=platform_name,
+        username=normalized_data.get("username", "未知"),
+        summary=summary_text,
+        original_text=normalized_data.get("text", ""),
+        keywords=parsed.get("keywords", []),
+        likes=normalized_data.get("likes", 0),
+        comments=normalized_data.get("comments", 0),
+        shares=normalized_data.get("shares", 0),
+        source_url=source_url,
+        post_type=parsed.get("post_type", "其他"),
+        user_id=user_id,
+        images=normalized_data.get("images", []),
+        image_text=normalized_data.get("image_text", ""),
+        source_type=platform,
+        capture_status=quality["status"],
+        extractor=extractor,
+        needs_review=quality["needs_review"],
+        raw_input=raw_value,
+        normalized_input=normalized_value,
+    )
+    return fid, {
+        "quality": quality,
+        "summary": summary_text,
+        "title": f"{platform_name}-{normalized_data.get('username', '未知')}",
+    }
 
 
 @app.route("/callback", methods=["POST"])
@@ -3009,7 +3434,6 @@ def handle_text_message(event):
                     return
 
                 # Process each post
-                platform_name = "Facebook" if platform == "facebook" else "Threads"
                 saved_count = 0
 
                 for i, post_data in enumerate(posts):
@@ -3017,26 +3441,17 @@ def handle_text_message(event):
                         print(f"[DEBUG] Processing post {i+1}, raw data keys: {post_data.keys()}")
                         normalized_data = normalize_social_post_data(post_data, platform)
                         print(f"[DEBUG] Normalized: likes={normalized_data.get('likes')}, comments={normalized_data.get('comments')}")
-                        summary = summarize_social_post(normalized_data, platform)
-                        parsed = parse_social_summary_response(summary)
 
                         post_url = post_data.get("url") or post_data.get("postUrl") or url
 
-                        if save_social_to_gdrive(
-                            platform=platform_name,
-                            username=normalized_data.get("username", "未知"),
-                            summary=parsed.get("summary", ""),
-                            original_text=normalized_data.get("text", ""),
-                            keywords=parsed.get("keywords", []),
-                            likes=normalized_data.get("likes", 0),
-                            comments=normalized_data.get("comments", 0),
-                            shares=normalized_data.get("shares", 0),
+                        fid, _capture = save_normalized_social_post(
+                            platform=platform,
+                            normalized_data=normalized_data,
                             source_url=post_url,
-                            post_type=parsed.get("post_type", "其他"),
+                            raw_input=url,
                             user_id=user_id,
-                            images=normalized_data.get("images", []),
-                            image_text=normalized_data.get("image_text", "")
-                        ):
+                        )
+                        if fid:
                             saved_count += 1
                     except Exception as e:
                         print(f"[DEBUG] Error processing post {i+1}: {str(e)}")
@@ -3047,7 +3462,7 @@ def handle_text_message(event):
                     messaging_api2.push_message(
                         PushMessageRequest(
                             to=user_id,
-                            messages=[TextMessage(text=f"✅ 完成！已爬取 {len(posts)} 篇貼文，成功存入 Notion {saved_count} 篇")]
+                                messages=[TextMessage(text=f"✅ 完成！已爬取 {len(posts)} 篇貼文，成功存入 Obsidian {saved_count} 篇")]
                         )
                     )
                 return
@@ -3105,34 +3520,23 @@ def handle_text_message(event):
                 return
 
             # Process each post
-            platform_name = "Facebook" if platform == "facebook" else "Threads"
             saved_count = 0
 
             for i, post_data in enumerate(posts):
                 try:
                     normalized_data = normalize_social_post_data(post_data, platform)
-                    summary = summarize_social_post(normalized_data, platform)
-                    parsed = parse_social_summary_response(summary)
 
                     # Get post URL if available
                     post_url = post_data.get("url") or post_data.get("postUrl") or url
 
-                    # Save to Notion
-                    if save_social_to_gdrive(
-                        platform=platform_name,
-                        username=normalized_data.get("username", "未知"),
-                        summary=parsed.get("summary", ""),
-                        original_text=normalized_data.get("text", ""),
-                        keywords=parsed.get("keywords", []),
-                        likes=normalized_data.get("likes", 0),
-                        comments=normalized_data.get("comments", 0),
-                        shares=normalized_data.get("shares", 0),
+                    fid, _capture = save_normalized_social_post(
+                        platform=platform,
+                        normalized_data=normalized_data,
                         source_url=post_url,
-                        post_type=parsed.get("post_type", "其他"),
+                        raw_input=text,
                         user_id=user_id,
-                        images=normalized_data.get("images", []),
-                        image_text=normalized_data.get("image_text", "")
-                    ):
+                    )
+                    if fid:
                         saved_count += 1
                         print(f"[DEBUG] Saved post {i+1}/{len(posts)}")
                 except Exception as e:
@@ -3144,7 +3548,7 @@ def handle_text_message(event):
                 messaging_api2.push_message(
                     PushMessageRequest(
                         to=user_id,
-                        messages=[TextMessage(text=f"✅ 完成！已爬取 {len(posts)} 篇貼文，成功存入 Notion {saved_count} 篇")]
+                        messages=[TextMessage(text=f"✅ 完成！已爬取 {len(posts)} 篇貼文，成功存入 Obsidian {saved_count} 篇")]
                     )
                 )
             return
@@ -3160,6 +3564,7 @@ def handle_text_message(event):
                 platform, url_type = detect_social_platform(url)
                 if platform:
                     print(f"[DEBUG] Detected {platform} {url_type} URL, scraping post...")
+                    extractor = social_extractor_name(platform)
 
                     # Check if Apify is configured
                     if not apify_client:
@@ -3167,7 +3572,7 @@ def handle_text_message(event):
                             url=url,
                             raw_input=text,
                             source_type=platform,
-                            extractor="apify",
+                            extractor=extractor,
                             status=CAPTURE_STATUS_FAILED,
                             reason="apify_not_configured",
                         )
@@ -3181,7 +3586,7 @@ def handle_text_message(event):
                             user_id=user_id,
                             source_type=platform,
                             capture_status=CAPTURE_STATUS_FAILED,
-                            extractor="apify",
+                            extractor=extractor,
                             needs_review=True,
                             raw_input=text,
                             normalized_input=normalize_input_light(text),
@@ -3230,7 +3635,7 @@ def handle_text_message(event):
                             url=url,
                             raw_input=text,
                             source_type=platform,
-                            extractor="apify",
+                            extractor=extractor,
                             status=CAPTURE_STATUS_FAILED,
                             reason="no_posts_returned",
                         )
@@ -3244,7 +3649,7 @@ def handle_text_message(event):
                             user_id=user_id,
                             source_type=platform,
                             capture_status=CAPTURE_STATUS_FAILED,
-                            extractor="apify",
+                            extractor=extractor,
                             needs_review=True,
                             raw_input=text,
                             normalized_input=normalize_input_light(text),
@@ -3265,15 +3670,19 @@ def handle_text_message(event):
                     normalized_data = normalize_social_post_data(post_data, platform)
                     print(f"[DEBUG] Normalized data: {normalized_data}")
 
-                    # Generate AI summary
-                    summary = summarize_social_post(normalized_data, platform)
-                    parsed = parse_social_summary_response(summary)
-
                     # Build response message
                     platform_emoji = "📘" if platform == "facebook" else "🧵"
-                    platform_name = "Facebook" if platform == "facebook" else "Threads"
+                    platform_name = platform_display_name(platform)
+                    fid, capture = save_normalized_social_post(
+                        platform=platform,
+                        normalized_data=normalized_data,
+                        source_url=url,
+                        raw_input=text,
+                        user_id=user_id,
+                    )
+                    quality = capture["quality"]
 
-                    response_text = f"{platform_emoji} {platform_name} 貼文已保存\n抓取狀態：full\n\n{parsed.get('summary') or summary[:300]}"
+                    response_text = f"{platform_emoji} {platform_name} 貼文已保存\n抓取狀態：{quality['status']}\n\n{capture['summary']}"
 
                     line_bot_api.reply_message_with_http_info(
                         ReplyMessageRequest(
@@ -3283,29 +3692,8 @@ def handle_text_message(event):
                     )
                     print(f"[DEBUG] Social post analysis sent successfully")
 
-                    # Save to Notion
-                    fid = save_social_to_gdrive(
-                        platform=platform_name,
-                        username=normalized_data.get("username", "未知"),
-                        summary=parsed.get("summary", ""),
-                        original_text=normalized_data.get("text", ""),
-                        keywords=parsed.get("keywords", []),
-                        likes=normalized_data.get("likes", 0),
-                        comments=normalized_data.get("comments", 0),
-                        shares=normalized_data.get("shares", 0),
-                        source_url=url,
-                        post_type=parsed.get("post_type", "其他"),
-                        user_id=user_id,
-                        images=normalized_data.get("images", []),
-                        image_text=normalized_data.get("image_text", ""),
-                        source_type=platform,
-                        capture_status=CAPTURE_STATUS_FULL,
-                        extractor="apify",
-                        needs_review=False,
-                        raw_input=text,
-                    )
                     if fid:
-                        user_last_file[user_id] = {"file_id": fid, "title": f"{platform_name}-{normalized_data.get('username', '未知')}", "saved_at": time.time()}
+                        user_last_file[user_id] = {"file_id": fid, "title": capture["title"], "saved_at": time.time()}
                     return
 
                 # Priority 2+3: Google Maps or general webpage
@@ -3327,15 +3715,26 @@ def handle_text_message(event):
                             place_data = scrape_google_maps(resolved_url)
                             if place_data:
                                 scraped_info = format_google_maps_result(place_data)
-                                page_summary = summarize_google_maps(scraped_info, resolved_url)
                                 extractor = "google-maps-apify"
-                                quality = {"status": CAPTURE_STATUS_FULL, "needs_review": False, "reason": ""}
+                                quality = assess_google_maps_place_data(place_data)
+                                if should_save_status_note_only("google_maps", quality["status"]):
+                                    page_summary = build_capture_status_note(
+                                        url=resolved_url,
+                                        raw_input=text,
+                                        source_type="google_maps",
+                                        extractor=extractor,
+                                        status=quality["status"],
+                                        reason=quality["reason"],
+                                        extracted_content=scraped_info,
+                                    )
+                                else:
+                                    page_summary = summarize_google_maps(scraped_info, resolved_url)
                             else:
                                 print(f"[DEBUG] Apify scraper failed, falling back to webpage fetch...")
                                 page_content = fetch_webpage_content(resolved_url)
                                 extractor = "jina"
                                 quality = assess_extracted_content(page_content)
-                                if quality["status"] == CAPTURE_STATUS_FAILED:
+                                if should_save_status_note_only("google_maps", quality["status"]):
                                     page_summary = build_capture_status_note(
                                         url=resolved_url,
                                         raw_input=text,
@@ -3352,8 +3751,8 @@ def handle_text_message(event):
                             source_type_inner = source_type_from_url(u)
                             page_content, extractor = fetch_content_by_source_type(u, source_type_inner)
                             print(f"[DEBUG] Content length: {len(page_content)}")
-                            quality = assess_extracted_content(page_content)
-                            if quality["status"] == CAPTURE_STATUS_FAILED:
+                            quality = assess_url_capture_quality(page_content, source_type_inner, extractor)
+                            if should_save_status_note_only(source_type_inner, quality["status"]):
                                 page_summary = build_capture_status_note(
                                     url=u,
                                     raw_input=text,

@@ -6,6 +6,7 @@ LINE Bot 功能測試
 import re
 import pytest
 from unittest.mock import patch, MagicMock, PropertyMock
+from types import SimpleNamespace
 import os
 import time
 import json
@@ -15,6 +16,7 @@ os.environ.setdefault("LINE_CHANNEL_ACCESS_TOKEN", "test_token")
 os.environ.setdefault("LINE_CHANNEL_SECRET", "test_secret")
 
 import main
+import desktop_voice_capture as desktop_voice
 
 
 # ============================================================
@@ -453,6 +455,63 @@ class TestCaptureQuality:
         assert main.source_type_from_url("https://www.104.com.tw/job/6m2k2") == "104"
         assert main.source_type_from_url("https://www.ptt.cc/bbs/Stock/M.123.html") == "ptt"
 
+    def test_social_extractor_name(self):
+        assert main.social_extractor_name("threads") == "threads-apify"
+        assert main.social_extractor_name("facebook") == "facebook-apify"
+        assert main.social_extractor_name("instagram") == "apify"
+
+    def test_assess_social_empty_content_failed(self):
+        post = {"text": "", "image_text": "", "images": []}
+        result = main.assess_social_post_content(post)
+        assert result["status"] == main.CAPTURE_STATUS_FAILED
+        assert result["needs_review"] is True
+        assert result["reason"] == "empty_social_content"
+
+    def test_assess_social_short_content_partial(self):
+        post = {"text": "太短了", "image_text": "", "images": []}
+        result = main.assess_social_post_content(post)
+        assert result["status"] == main.CAPTURE_STATUS_PARTIAL
+        assert result["needs_review"] is True
+
+    def test_assess_social_full_content(self):
+        post = {"text": "這是一段有足夠資訊的社群貼文內容，可以支撐摘要而不是靠 AI 猜測。", "image_text": "", "images": []}
+        result = main.assess_social_post_content(post)
+        assert result["status"] == main.CAPTURE_STATUS_FULL
+        assert result["needs_review"] is False
+
+    def test_format_social_extracted_content_preserves_raw_fields(self):
+        post = {
+            "username": "tester",
+            "text": "貼文原文",
+            "image_text": "圖片文字",
+            "images": ["https://example.com/a.jpg"],
+            "likes": 1,
+            "comments": 2,
+            "shares": 3,
+        }
+        result = main.format_social_extracted_content(post, "https://threads.net/@tester/post/abc")
+        assert "tester" in result
+        assert "貼文原文" in result
+        assert "圖片文字" in result
+        assert "https://example.com/a.jpg" in result
+
+    def test_assess_youtube_metadata_only_is_partial(self):
+        content = "標題：Test\n頻道：Channel\n\n字幕：尚未抓取逐字稿，先保存影片 metadata。"
+        result = main.assess_url_capture_quality(content, "youtube", "youtube-oembed")
+        assert result["status"] == main.CAPTURE_STATUS_PARTIAL
+        assert result["needs_review"] is True
+        assert result["reason"] == "youtube_metadata_only"
+
+    def test_assess_youtube_transcript_can_be_full(self):
+        content = "標題：Test\n\n逐字稿：\n" + ("這是一段逐字稿內容。" * 20)
+        result = main.assess_url_capture_quality(content, "youtube", "youtube-transcript")
+        assert result["status"] == main.CAPTURE_STATUS_FULL
+        assert result["needs_review"] is False
+
+    def test_status_note_only_for_youtube_partial(self):
+        assert main.should_save_status_note_only("youtube", main.CAPTURE_STATUS_PARTIAL) is True
+        assert main.should_save_status_note_only("webpage", main.CAPTURE_STATUS_PARTIAL) is False
+
     def test_format_weekly_review_counts_status(self):
         notes = [
             {"name": "2026-05-01-a.md", "capture_status": "full", "source_type": "webpage", "needs_review": "false"},
@@ -863,6 +922,97 @@ class TestSaveToGDrive:
 
         main.GDRIVE_VAULT_FOLDER_ID = original
 
+    @patch("main.save_to_gdrive")
+    def test_save_social_passes_capture_metadata(self, mock_save):
+        mock_save.return_value = "file123"
+
+        result = main.save_social_to_gdrive(
+            platform="Threads",
+            username="tester",
+            summary="summary",
+            original_text="original",
+            keywords=["test"],
+            likes=1,
+            comments=2,
+            shares=3,
+            source_url="https://threads.net/@tester/post/abc",
+            source_type="threads",
+            capture_status=main.CAPTURE_STATUS_PARTIAL,
+            extractor="threads-apify",
+            needs_review=True,
+            raw_input=" 看看 https://threads.net/@tester/post/abc ",
+        )
+
+        assert result == "file123"
+        kwargs = mock_save.call_args.kwargs
+        assert kwargs["source_type"] == "threads"
+        assert kwargs["capture_status"] == main.CAPTURE_STATUS_PARTIAL
+        assert kwargs["extractor"] == "threads-apify"
+        assert kwargs["needs_review"] is True
+        assert kwargs["raw_input"] == " 看看 https://threads.net/@tester/post/abc "
+        assert kwargs["normalized_input"] == "看看 https://threads.net/@tester/post/abc"
+
+    @patch("main.summarize_social_post")
+    @patch("main.save_to_gdrive")
+    def test_save_normalized_social_post_failed_skips_ai(self, mock_save, mock_summary):
+        mock_save.return_value = "file_failed"
+
+        fid, capture = main.save_normalized_social_post(
+            platform="threads",
+            normalized_data={
+                "username": "tester",
+                "text": "",
+                "image_text": "",
+                "images": [],
+                "likes": 0,
+                "comments": 0,
+                "shares": 0,
+            },
+            source_url="https://threads.net/@tester/post/abc",
+            raw_input="https://threads.net/@tester/post/abc",
+            user_id="user1",
+        )
+
+        assert fid == "file_failed"
+        assert capture["quality"]["status"] == main.CAPTURE_STATUS_FAILED
+        mock_summary.assert_not_called()
+        kwargs = mock_save.call_args.kwargs
+        assert kwargs["capture_status"] == main.CAPTURE_STATUS_FAILED
+        assert kwargs["source_type"] == "threads"
+        assert kwargs["extractor"] == "threads-apify"
+        assert kwargs["needs_review"] is True
+
+    @patch("main.save_social_to_gdrive")
+    @patch("main.summarize_social_post")
+    def test_save_normalized_social_post_full_uses_ai(self, mock_summary, mock_save_social):
+        mock_summary.return_value = "這篇貼文已經有足夠內容，可以生成可靠摘要。"
+        mock_save_social.return_value = "file_full"
+
+        fid, capture = main.save_normalized_social_post(
+            platform="facebook",
+            normalized_data={
+                "username": "tester",
+                "text": "這是一段有足夠資訊的 Facebook 貼文內容，能夠支撐可靠的摘要與關鍵字提取。",
+                "image_text": "",
+                "images": [],
+                "likes": 1,
+                "comments": 2,
+                "shares": 3,
+            },
+            source_url="https://facebook.com/user/posts/123",
+            raw_input="https://facebook.com/user/posts/123",
+            user_id="user1",
+        )
+
+        assert fid == "file_full"
+        assert capture["quality"]["status"] == main.CAPTURE_STATUS_FULL
+        mock_summary.assert_called_once()
+        kwargs = mock_save_social.call_args.kwargs
+        assert kwargs["source_type"] == "facebook"
+        assert kwargs["capture_status"] == main.CAPTURE_STATUS_FULL
+        assert kwargs["extractor"] == "facebook-apify"
+        assert kwargs["needs_review"] is False
+
 
 # ============================================================
 # 13. OpenAI 功能測試（使用 mock）
@@ -978,6 +1128,114 @@ class TestApifyScraping:
 
 
 # ============================================================
+# 14.25 YouTube extractor 測試
+# ============================================================
+
+class TestYouTubeExtractor:
+    """測試 YouTube metadata 與逐字稿抽取"""
+
+    def test_extract_video_id_watch_url(self):
+        assert main.extract_youtube_video_id("https://www.youtube.com/watch?v=abc123") == "abc123"
+
+    def test_extract_video_id_short_url(self):
+        assert main.extract_youtube_video_id("https://youtu.be/abc123?si=xyz") == "abc123"
+
+    def test_extract_video_id_shorts_url(self):
+        assert main.extract_youtube_video_id("https://www.youtube.com/shorts/short123") == "short123"
+
+    def test_extract_yt_initial_player_response(self):
+        payload = {"videoDetails": {"title": "Test Video"}}
+        html = f"<script>var ytInitialPlayerResponse = {json.dumps(payload)};</script>"
+        result = main.extract_yt_initial_player_response(html)
+        assert result["videoDetails"]["title"] == "Test Video"
+
+    def test_choose_caption_track_prefers_zh(self):
+        player_response = {
+            "captions": {
+                "playerCaptionsTracklistRenderer": {
+                    "captionTracks": [
+                        {"languageCode": "en", "baseUrl": "https://example.com/en"},
+                        {"languageCode": "zh-Hant", "baseUrl": "https://example.com/zh"},
+                    ]
+                }
+            }
+        }
+        result = main.choose_youtube_caption_track(player_response)
+        assert result["languageCode"] == "zh-Hant"
+
+    @patch("main.requests.get")
+    def test_fetch_youtube_transcript_json3(self, mock_get):
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.text = json.dumps({"events": [{"segs": [{"utf8": "第一句"}, {"utf8": "第二句"}]}]})
+        response.json.return_value = {"events": [{"segs": [{"utf8": "第一句"}, {"utf8": "第二句"}]}]}
+        mock_get.return_value = response
+
+        result = main.fetch_youtube_transcript("https://youtube.com/api/timedtext?v=abc")
+        assert "第一句第二句" in result
+        assert "fmt=json3" in mock_get.call_args.args[0]
+
+    @patch("main.requests.get")
+    def test_fetch_youtube_content_with_transcript(self, mock_get):
+        oembed_response = MagicMock()
+        oembed_response.raise_for_status = MagicMock()
+        oembed_response.json.return_value = {
+            "title": "OEmbed Title",
+            "author_name": "Channel",
+            "author_url": "https://youtube.com/@channel",
+        }
+        player_payload = {
+            "videoDetails": {
+                "title": "Watch Title",
+                "author": "Watch Channel",
+                "shortDescription": "Video description",
+                "lengthSeconds": "120",
+            },
+            "microformat": {"playerMicroformatRenderer": {"publishDate": "2026-01-01"}},
+            "captions": {
+                "playerCaptionsTracklistRenderer": {
+                    "captionTracks": [{"languageCode": "zh-Hant", "baseUrl": "https://example.com/caption"}]
+                }
+            },
+        }
+        watch_response = MagicMock()
+        watch_response.raise_for_status = MagicMock()
+        watch_response.text = f"<script>var ytInitialPlayerResponse = {json.dumps(player_payload)};</script>"
+        watch_response.url = "https://www.youtube.com/watch?v=abc"
+        transcript_response = MagicMock()
+        transcript_response.raise_for_status = MagicMock()
+        transcript_response.text = json.dumps({"events": [{"segs": [{"utf8": "逐字稿內容"}]}]})
+        transcript_response.json.return_value = {"events": [{"segs": [{"utf8": "逐字稿內容"}]}]}
+        mock_get.side_effect = [oembed_response, watch_response, transcript_response]
+
+        content, extractor = main.fetch_youtube_content("https://www.youtube.com/watch?v=abc")
+        assert extractor == "youtube-transcript"
+        assert "OEmbed Title" in content
+        assert "逐字稿內容" in content
+        assert "發布日期：2026-01-01" in content
+
+    @patch("main.requests.get")
+    def test_fetch_youtube_content_metadata_only(self, mock_get):
+        oembed_response = MagicMock()
+        oembed_response.raise_for_status = MagicMock()
+        oembed_response.json.return_value = {
+            "title": "Metadata Only",
+            "author_name": "Channel",
+            "author_url": "https://youtube.com/@channel",
+        }
+        watch_response = MagicMock()
+        watch_response.raise_for_status = MagicMock()
+        watch_response.text = "<script>var ytInitialPlayerResponse = {\"videoDetails\": {}};</script>"
+        watch_response.url = "https://www.youtube.com/watch?v=abc"
+        mock_get.side_effect = [oembed_response, watch_response]
+
+        content, extractor = main.fetch_youtube_content("https://www.youtube.com/watch?v=abc")
+        assert extractor == "youtube-oembed"
+        assert "Metadata Only" in content
+        assert "尚未抓取逐字稿" in content
+
+
+# ============================================================
 # 14.5 Google Maps 格式化測試
 # ============================================================
 
@@ -1089,6 +1347,31 @@ class TestFormatGoogleMapsResult:
         result = main.format_google_maps_result(place)
         assert "4.2" in result
         assert "50" in result
+
+    def test_assess_google_maps_full_place(self):
+        place = {
+            "title": "東京拉麵店",
+            "categoryName": "拉麵店",
+            "address": "東京都新宿區1-2-3",
+        }
+        result = main.assess_google_maps_place_data(place)
+        assert result["status"] == main.CAPTURE_STATUS_FULL
+        assert result["needs_review"] is False
+
+    def test_assess_google_maps_title_only_partial(self):
+        place = {"title": "只有名稱的地點"}
+        result = main.assess_google_maps_place_data(place)
+        assert result["status"] == main.CAPTURE_STATUS_PARTIAL
+        assert result["needs_review"] is True
+        assert result["reason"] == "limited_place_fields"
+
+    def test_assess_google_maps_empty_failed(self):
+        result = main.assess_google_maps_place_data({})
+        assert result["status"] == main.CAPTURE_STATUS_FAILED
+        assert result["needs_review"] is True
+
+    def test_status_note_only_for_google_maps_partial(self):
+        assert main.should_save_status_note_only("google_maps", main.CAPTURE_STATUS_PARTIAL) is True
 
 
 # ============================================================
@@ -1735,6 +2018,156 @@ class TestHealthzEndpoint:
         data = response.get_json()
         assert data["status"] == "ok"
         assert "ts" in data
+
+
+class TestDesktopVoiceCapture:
+    """測試桌面語音工具的防呆邏輯"""
+
+    def test_desktop_voice_hallucination_patterns(self):
+        assert desktop_voice.is_hallucination("記得幫我訂閱、按讚及分享唷") is True
+        assert desktop_voice.is_hallucination("ご視聴ありがとうございました。") is True
+
+    def test_desktop_voice_valid_transcript(self):
+        assert desktop_voice.is_hallucination("這是我今天讀書想到的一個重點") is False
+
+    def test_desktop_voice_audio_level_silence(self):
+        audio = desktop_voice.np.zeros((1600, 1), dtype="float32")
+        level = desktop_voice.get_audio_level(audio)
+        assert level["rms"] == 0.0
+        assert level["peak"] == 0.0
+
+    def test_desktop_voice_shortcut_text(self):
+        args = SimpleNamespace(
+            paste_hotkey="ctrl+alt+z",
+            thought_hotkey="ctrl+alt+x",
+            meeting_hotkey="ctrl+alt+c",
+            confirm_hotkey="f8",
+        )
+        result = desktop_voice.get_shortcuts_text(args)
+        assert "ctrl+alt+z" in result
+        assert "ctrl+alt+x" in result
+        assert "ctrl+alt+c" in result
+        assert "ctrl+alt+e" in result
+        assert "ctrl+alt+j" in result
+        assert "快速輸入" in result
+        assert "翻譯英文" in result
+        assert "f8" in result
+
+    def test_desktop_voice_shortcut_text_legacy_hotkey(self):
+        args = SimpleNamespace(
+            hotkey="ctrl+shift+v",
+            thought_hotkey="ctrl+alt+x",
+            meeting_hotkey="ctrl+alt+c",
+        )
+        result = desktop_voice.get_shortcuts_text(args)
+        assert "ctrl+shift+v" in result
+
+    def test_desktop_voice_control_text(self):
+        args = SimpleNamespace(confirm_hotkey="f8")
+        result = desktop_voice.get_control_text(args)
+        assert "F8" not in result  # preserve user-provided casing
+        assert "f8" in result
+        assert "Enter" not in result
+        assert "空白" not in result
+        assert "英文" in result
+        assert "日文" in result
+
+    def test_desktop_voice_load_dictionary(self, tmp_path):
+        dictionary = tmp_path / "voice_dictionary.txt"
+        dictionary.write_text("Drizzle ORM\nKaku", encoding="utf-8")
+        args = SimpleNamespace(dictionary_file=str(dictionary))
+        assert "Drizzle ORM" in desktop_voice.load_voice_dictionary(args)
+
+    def test_desktop_voice_load_dictionary_missing(self, tmp_path):
+        args = SimpleNamespace(dictionary_file=str(tmp_path / "missing.txt"))
+        assert desktop_voice.load_voice_dictionary(args) == ""
+
+    def test_desktop_voice_dictionary_section_supports_aliases(self):
+        result = desktop_voice.build_dictionary_section("移傳 => 移轉")
+        assert "錯字 => 正字" in result
+        assert "移傳 => 移轉" in result
+
+    def test_desktop_voice_build_thought_note(self):
+        result = desktop_voice.build_voice_note(
+            mode="thought",
+            title="讀書想法",
+            normalized_text="整理後內容",
+            transcript="原始內容",
+        )
+        assert "type: 語音筆記" in result
+        assert "source_type: audio" in result
+        assert "extractor: desktop-whisper" in result
+        assert "## 整理後文字" in result
+        assert "整理後內容" in result
+        assert "原始內容" in result
+
+    def test_desktop_voice_build_meeting_note(self):
+        result = desktop_voice.build_voice_note(
+            mode="meeting",
+            title="會議記錄",
+            normalized_text="整理後逐字稿",
+            transcript="原始逐字稿",
+            summary="## 摘要\n- 重點",
+        )
+        assert "type: 會議記錄" in result
+        assert "## 會議整理" in result
+        assert "## 摘要" in result
+
+    @patch("desktop_voice_capture.load_voice_dictionary")
+    @patch("desktop_voice_capture.OpenAI")
+    def test_desktop_voice_translate_transcript(self, _mock_openai, mock_dictionary):
+        mock_dictionary.return_value = "Kaku"
+        client = MagicMock()
+        response = MagicMock()
+        response.choices = [MagicMock()]
+        response.choices[0].message.content = "This is a test."
+        client.chat.completions.create.return_value = response
+
+        result = desktop_voice.translate_transcript(client, "這是一個測試", "English", args=SimpleNamespace())
+        assert result == "This is a test."
+        prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+        assert "Kaku" in prompt
+        assert "English" in prompt
+
+    def test_desktop_voice_get_capture_dir_fallback(self, tmp_path):
+        args = SimpleNamespace(
+            vault_path=str(tmp_path / "missing-vault"),
+            capture_dir=str(tmp_path / "captures"),
+            thought_folder="Sources\\desktop-voice",
+            meeting_folder="Meetings",
+        )
+
+        result = desktop_voice.get_capture_dir("thought", args)
+        assert result == tmp_path / "captures" / "thoughts"
+
+    def test_desktop_voice_write_markdown_note(self, tmp_path):
+        args = SimpleNamespace(
+            vault_path="",
+            capture_dir=str(tmp_path / "captures"),
+            thought_folder="Sources\\desktop-voice",
+            meeting_folder="Meetings",
+        )
+
+        path = desktop_voice.write_markdown_note("thought", "測試標題", "內容", args)
+        assert path.exists()
+        assert path.read_text(encoding="utf-8") == "內容"
+
+    def test_desktop_voice_notify_logs_only(self, capsys):
+        desktop_voice.notify("Test", "Line 1\nLine 2")
+        captured = capsys.readouterr()
+        assert "[Test] Line 1 | Line 2" in captured.out
+
+    def test_status_overlay_disabled_is_noop(self):
+        overlay = desktop_voice.StatusOverlay(enabled=False)
+        overlay.set("待命", "Title", "Body")
+        overlay.hide()
+        overlay.show()
+        overlay.stop()
+        assert overlay.enabled is False
+
+    def test_status_overlay_idle_default(self):
+        overlay = desktop_voice.StatusOverlay(enabled=False)
+        assert overlay.idle_seconds == desktop_voice.DEFAULT_OVERLAY_IDLE_SECONDS
 
 
 if __name__ == "__main__":
