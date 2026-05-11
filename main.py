@@ -49,6 +49,11 @@ LINEBOT_USAGE_CARD_FILES = [
     "linebot-usage-03-commands.png",
     "linebot-usage-04-buttons.png",
 ]
+LINEBOT_WORKFLOW_CARD_FILES = [
+    "linebot-usage-05-workflow.png",
+    "linebot-usage-06-agent-rhythm.png",
+]
+LINEBOT_CARD_FILES = LINEBOT_USAGE_CARD_FILES + LINEBOT_WORKFLOW_CARD_FILES
 LINEBOT_USAGE_HELP_TEXTS = {
     "/?",
     "/？",
@@ -62,6 +67,16 @@ LINEBOT_USAGE_HELP_TEXTS = {
     "使用方法",
     "按鈕",
     "指令",
+}
+LINEBOT_WORKFLOW_HELP_TEXTS = {
+    "工作流",
+    "整理流程",
+    "定期整理",
+    "每週整理",
+    "ai整理",
+    "aiagent",
+    "agent",
+    "workflow",
 }
 
 CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
@@ -331,6 +346,11 @@ def is_linebot_usage_help_request(text: str) -> bool:
     return compact in LINEBOT_USAGE_HELP_TEXTS
 
 
+def is_linebot_workflow_help_request(text: str) -> bool:
+    compact = re.sub(r'\s+', '', text or "").lower()
+    return compact in LINEBOT_WORKFLOW_HELP_TEXTS
+
+
 def get_public_base_url() -> str:
     configured = (
         os.getenv("LINE_BOT_PUBLIC_BASE_URL") or
@@ -345,16 +365,24 @@ def get_public_base_url() -> str:
     return f"{proto}://{host}".rstrip("/")
 
 
-def build_linebot_usage_image_messages() -> list[LineImageMessage]:
+def build_linebot_card_image_messages(card_files: list[str]) -> list[LineImageMessage]:
     base_url = get_public_base_url()
     messages = []
-    for filename in LINEBOT_USAGE_CARD_FILES:
+    for filename in card_files:
         image_url = f"{base_url}/linebot-usage/{filename}"
         messages.append(LineImageMessage(
             originalContentUrl=image_url,
             previewImageUrl=image_url,
         ))
     return messages
+
+
+def build_linebot_usage_image_messages() -> list[LineImageMessage]:
+    return build_linebot_card_image_messages(LINEBOT_USAGE_CARD_FILES)
+
+
+def build_linebot_workflow_image_messages() -> list[LineImageMessage]:
+    return build_linebot_card_image_messages(LINEBOT_WORKFLOW_CARD_FILES)
 
 
 def assess_extracted_content(content: str) -> dict:
@@ -3291,7 +3319,7 @@ def healthz():
 @app.route("/linebot-usage/<path:filename>", methods=["GET"])
 def linebot_usage_asset(filename):
     """Serve LINE Bot usage cards for LINE image messages."""
-    if filename not in LINEBOT_USAGE_CARD_FILES:
+    if filename not in LINEBOT_CARD_FILES:
         abort(404)
     return send_from_directory(
         LINEBOT_USAGE_DIR,
@@ -3435,11 +3463,25 @@ def handle_text_message(event):
                 "LINE Bot 功能說明\n\n"
                 "平常直接傳文字、網址、圖片或語音即可保存。"
                 "需要查詢或整理時，再輸入圖卡中的指令。"
+                "\n\n輸入「工作流」可以查看每天捕捉與定期整理節奏。"
             )
             line_bot_api.reply_message_with_http_info(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
                     messages=[TextMessage(text=usage_intro), *build_linebot_usage_image_messages()],
+                )
+            )
+            return
+
+        if is_linebot_workflow_help_request(text):
+            workflow_intro = (
+                "LINE Bot 工作流\n\n"
+                "每天先把素材丟進來，定期再請 AI Agent 整理成 Wiki、週報或行動清單。"
+            )
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=workflow_intro), *build_linebot_workflow_image_messages()],
                 )
             )
             return

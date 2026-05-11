@@ -872,6 +872,12 @@ class TestFlaskRoutes:
         assert response.status_code == 200
         assert response.mimetype == "image/png"
 
+    def test_linebot_workflow_png_route(self):
+        """工作流圖卡也應可透過 Flask route 提供給 LINE"""
+        response = self.client.get("/linebot-usage/linebot-usage-05-workflow.png")
+        assert response.status_code == 200
+        assert response.mimetype == "image/png"
+
     def test_linebot_usage_route_rejects_unlisted_files(self):
         """只允許公開 LINE 使用說明 PNG 圖卡"""
         response = self.client.get("/linebot-usage/linebot-usage-01-overview.svg")
@@ -888,6 +894,13 @@ class TestLineBotUsageCards:
         assert main.is_linebot_usage_help_request("按鈕") is True
         assert main.is_linebot_usage_help_request("一般文字") is False
 
+    def test_workflow_help_trigger_texts(self):
+        assert main.is_linebot_workflow_help_request("工作流") is True
+        assert main.is_linebot_workflow_help_request("定期整理") is True
+        assert main.is_linebot_workflow_help_request("AI Agent") is True
+        assert main.is_linebot_workflow_help_request("workflow") is True
+        assert main.is_linebot_workflow_help_request("功能") is False
+
     def test_build_usage_image_messages_from_forwarded_host(self):
         with main.app.test_request_context(
             "/callback",
@@ -901,6 +914,20 @@ class TestLineBotUsageCards:
         assert len(messages) == 4
         assert messages[0].original_content_url == "https://example.com/linebot-usage/linebot-usage-01-overview.png"
         assert messages[0].preview_image_url == messages[0].original_content_url
+
+    def test_build_workflow_image_messages_from_forwarded_host(self):
+        with main.app.test_request_context(
+            "/callback",
+            headers={
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "example.com",
+            },
+        ):
+            messages = main.build_linebot_workflow_image_messages()
+
+        assert len(messages) == 2
+        assert messages[0].original_content_url == "https://example.com/linebot-usage/linebot-usage-05-workflow.png"
+        assert messages[1].original_content_url == "https://example.com/linebot-usage/linebot-usage-06-agent-rhythm.png"
 
 
 # ============================================================

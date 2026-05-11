@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600" viewBox="0 0 1200 1600">
+  <style>
+    .bg { fill: #f6f7fb; }
+    .title { font: 700 54px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #172033; }
+    .subtitle { font: 400 26px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #596779; }
+    .card { fill: #ffffff; stroke: #dbe2ec; stroke-width: 2; rx: 24; }
+    .head { font: 700 30px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #172033; }
+    .body { font: 400 24px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #26384c; }
+    .small { font: 400 21px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #657386; }
+    .code { font: 700 23px "Consolas", "Microsoft JhengHei", sans-serif; fill: #0f5b50; }
+    .tag { fill: #eaf3ff; rx: 18; }
+    .tagText { font: 700 22px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #215985; }
+  </style>
+  <rect class="bg" width="1200" height="1600"/>
+  <text class="title" x="72" y="110">定期整理節奏</text>
+  <text class="subtitle" x="72" y="158">建議把整理分成每天、每週、每月或專案前。</text>
+
+  <rect class="card" x="72" y="230" width="1056" height="260"/>
+  <rect class="tag" x="112" y="275" width="145" height="44"/>
+  <text class="tagText" x="140" y="305">每天</text>
+  <text class="head" x="112" y="370">只做捕捉，不做整理</text>
+  <text class="body" x="112" y="430">看到什麼就丟 LINE Bot。想法、網址、圖片、語音都可以。</text>
+  <text class="small" x="112" y="475">可選：睡前輸入「今日回顧」快速看今天收了什麼。</text>
+
+  <rect class="card" x="72" y="545" width="1056" height="330"/>
+  <rect class="tag" x="112" y="590" width="145" height="44"/>
+  <text class="tagText" x="140" y="620">每週</text>
+  <text class="head" x="112" y="685">做一次消化</text>
+  <text class="code" x="112" y="742">消化狀態</text>
+  <text class="code" x="112" y="790">整理本週</text>
+  <text class="body" x="112" y="850">檢查 full、partial、failed，請 AI Agent 補整理重點與行動清單。</text>
+
+  <rect class="card" x="72" y="930" width="1056" height="330"/>
+  <rect class="tag" x="112" y="975" width="210" height="44"/>
+  <text class="tagText" x="140" y="1005">每月或專案前</text>
+  <text class="head" x="112" y="1070">把素材變成主題知識</text>
+  <text class="code" x="112" y="1127">整理筆記</text>
+  <text class="code" x="112" y="1175">查 AI</text>
+  <text class="body" x="112" y="1235">請 AI Agent 針對某主題產出 Wiki、比較表、決策筆記或下一步。</text>
+
+  <rect class="card" x="72" y="1315" width="1056" height="190"/>
+  <text class="head" x="112" y="1375">可以直接對 AI Agent 說</text>
+  <text class="body" x="112" y="1432">請整理最近 Sources 裡關於「某主題」的資料，產出 Wiki、重點摘要與待辦。</text>
+  <text class="small" x="112" y="1485">如果有 partial 或 failed，先列出需要人工補看的項目。</text>
+</svg>

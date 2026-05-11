@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600" viewBox="0 0 1200 1600">
+  <style>
+    .bg { fill: #f7f9f7; }
+    .title { font: 700 54px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #10231f; }
+    .subtitle { font: 400 26px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #56665f; }
+    .card { fill: #ffffff; stroke: #d7e3dc; stroke-width: 2; rx: 24; }
+    .stage { fill: #0f766e; rx: 22; }
+    .stageText { font: 700 27px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #ffffff; }
+    .head { font: 700 30px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #10231f; }
+    .body { font: 400 24px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #273a35; }
+    .small { font: 400 21px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #60736c; }
+    .arrow { stroke: #9bb9ad; stroke-width: 5; fill: none; marker-end: url(#arrow); }
+    .band { fill: #edf7f3; rx: 20; }
+  </style>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#9bb9ad"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="1200" height="1600"/>
+  <text class="title" x="72" y="110">整體使用 Workflow</text>
+  <text class="subtitle" x="72" y="158">LINE Bot 負責捕捉，Obsidian 保存素材，AI Agent 定期消化整理。</text>
+
+  <rect class="card" x="72" y="220" width="1056" height="360"/>
+  <rect class="stage" x="112" y="282" width="210" height="64"/>
+  <text class="stageText" x="145" y="323">1 捕捉</text>
+  <text class="head" x="112" y="410">每天直接丟進 LINE Bot</text>
+  <text class="body" x="112" y="468">文字想法、文章網址、YouTube、地圖、社群貼文、圖片、語音。</text>
+  <text class="small" x="112" y="526">重點是不在當下整理，先降低捕捉成本。</text>
+
+  <path class="arrow" d="M600 590 C600 625 600 650 600 685"/>
+
+  <rect class="card" x="72" y="700" width="1056" height="280"/>
+  <rect class="stage" x="112" y="762" width="210" height="64"/>
+  <text class="stageText" x="145" y="803">2 沉澱</text>
+  <text class="head" x="112" y="890">存到 Obsidian Sources</text>
+  <text class="body" x="112" y="948">每筆保留原始輸入、摘要、來源、capture_status 與 needs_review。</text>
+
+  <path class="arrow" d="M600 990 C600 1025 600 1050 600 1085"/>
+
+  <rect class="card" x="72" y="1100" width="500" height="300"/>
+  <rect class="stage" x="112" y="1160" width="210" height="64"/>
+  <text class="stageText" x="145" y="1201">3 消化</text>
+  <text class="head" x="112" y="1288">定期叫 AI Agent 整理</text>
+  <text class="body" x="112" y="1346">看 partial / failed、合併同主題、產出週報與待辦。</text>
+
+  <rect class="card" x="628" y="1100" width="500" height="300"/>
+  <rect class="stage" x="668" y="1160" width="210" height="64"/>
+  <text class="stageText" x="701" y="1201">4 輸出</text>
+  <text class="head" x="668" y="1288">變成可用知識</text>
+  <text class="body" x="668" y="1346">Wiki、決策筆記、專案素材、行動清單、週報。</text>
+
+  <rect class="band" x="72" y="1460" width="1056" height="88"/>
+  <text class="body" x="112" y="1515">一句話：先全部收進來，再用固定節奏把素材變成知識。</text>
+</svg>
