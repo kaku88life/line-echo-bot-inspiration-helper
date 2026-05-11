@@ -29,7 +29,7 @@ type: URL摘要 | 文字筆記 | 語音筆記 | 圖片分析 | 翻譯 | 社群�
 category: 科技 | AI | 金融 | 商業 | 新聞 | 教學 | 地圖 | 投資 | 生活 | 其他
 source_type: text | audio | image | webpage | threads | facebook | youtube | google_maps | 104 | ptt
 capture_status: full | partial | failed
-extractor: line-text | line-audio | line-image | jina | direct-html | apify | youtube | google-maps | ptt | 104 | fallback
+extractor: line-text | line-audio | line-image | jina | direct-html | apify | google-maps-apify | youtube-transcript | youtube-oembed | ptt-html | 104-ajax | fallback
 needs_review: true | false
 tags: [tag1, tag2]
 source: "https://example.com"
@@ -47,6 +47,31 @@ or regulations should be lightly normalized only.
 - If extraction is incomplete but useful, save `capture_status: partial`.
 - LINE replies should stay short; the full extraction, raw input, and status live
   in Obsidian.
+
+## YouTube Capture Rules
+
+- YouTube URLs should use the YouTube metadata and captions extractor before
+  generic webpage fallback.
+- Extract and preserve video id, title, channel, channel URL, canonical video
+  URL, publish date, upload date, length, view count, category, description, and
+  transcript when public captions are available.
+- Prefer Traditional Chinese captions, then other Chinese captions, then English.
+  Manual caption tracks are preferred over automatic tracks when language is the
+  same.
+- If only metadata is available and no transcript is captured, save a
+  `capture_status: partial` status note with `needs_review: true` instead of
+  generating a normal summary.
+
+## Google Maps Capture Rules
+
+- Google Maps URLs should resolve short links first, then use the Apify
+  `compass/crawler-google-places` extractor before generic webpage fallback.
+- Extract and preserve name, category, address, rating, review count, phone,
+  website, Google Maps URL, price, opening hours, description, Plus Code,
+  coordinates, review distribution, and a bounded review excerpt when available.
+- If the place data contains only the name or otherwise has fewer than two useful
+  detail fields, save a `capture_status: partial` status note with
+  `needs_review: true` instead of generating a normal summary.
 
 ## PTT Capture Rules
 

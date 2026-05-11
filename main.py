@@ -656,76 +656,170 @@ def scrape_google_maps(url: str) -> dict | None:
         return None
 
 
+def clean_google_maps_value(value) -> str:
+    """Normalize Google Maps scraped values without exposing raw nested noise."""
+    if value is None or value is False:
+        return ""
+    if isinstance(value, bool):
+        return "是" if value else ""
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return re.sub(r'\s+', ' ', value).strip()
+    if isinstance(value, (list, tuple, set)):
+        parts = [clean_google_maps_value(item) for item in value]
+        return "、".join(part for part in parts if part)
+    if isinstance(value, dict):
+        for key in ["text", "name", "title", "simpleText", "label", "value"]:
+            cleaned = clean_google_maps_value(value.get(key))
+            if cleaned:
+                return cleaned
+        return json.dumps(value, ensure_ascii=False)
+    return str(value).strip()
+
+
+def get_google_maps_review_count(place: dict):
+    for key in ["reviewsCount", "reviewCount", "numberOfReviews"]:
+        value = place.get(key)
+        if value:
+            return value
+    reviews = place.get("reviews")
+    if isinstance(reviews, list):
+        return len(reviews)
+    if isinstance(reviews, (int, float, str)) and reviews:
+        return reviews
+    return ""
+
+
 def format_google_maps_result(place: dict) -> str:
-    """Format scraped Google Maps place data into a readable summary"""
+    """Format scraped Google Maps place data into a readable summary."""
+    place = place or {}
     lines = []
 
-    name = place.get("title") or place.get("name") or "未知地點"
-    lines.append(f"📍 地點名稱：{name}")
+    name = clean_google_maps_value(place.get("title") or place.get("name")) or "未知地點"
+    lines.append(f"地點名稱：{name}")
 
-    # Category / type
-    category = place.get("categoryName") or place.get("category") or ""
+    category = clean_google_maps_value(place.get("categoryName") or place.get("category"))
     if category:
-        lines.append(f"🏷️ 類型：{category}")
+        lines.append(f"類型：{category}")
 
-    # Address
-    address = place.get("address") or place.get("street") or ""
+    status_flags = []
+    if place.get("temporarilyClosed"):
+        status_flags.append("暫停營業")
+    if place.get("permanentlyClosed"):
+        status_flags.append("永久停業")
+    if place.get("closed") is True:
+        status_flags.append("已停業")
+    if status_flags:
+        lines.append(f"營業狀態：{'、'.join(status_flags)}")
+
+    address = clean_google_maps_value(place.get("address") or place.get("street"))
     if address:
-        lines.append(f"📮 地址：{address}")
+        lines.append(f"地址：{address}")
 
-    # Rating
-    rating = place.get("totalScore") or place.get("rating") or place.get("stars")
-    reviews_count = place.get("reviewsCount") or place.get("reviews") or 0
+    rating = clean_google_maps_value(place.get("totalScore") or place.get("rating") or place.get("stars"))
+    reviews_count = clean_google_maps_value(get_google_maps_review_count(place))
     if rating:
-        lines.append(f"⭐ 評分：{rating}/5（{reviews_count} 則評論）")
+        review_suffix = f"（{reviews_count} 則評論）" if reviews_count else ""
+        lines.append(f"評分：{rating}/5{review_suffix}")
 
-    # Phone
-    phone = place.get("phone") or place.get("phoneUnformatted") or ""
+    phone = clean_google_maps_value(place.get("phone") or place.get("phoneUnformatted"))
     if phone:
-        lines.append(f"📞 電話：{phone}")
+        lines.append(f"電話：{phone}")
 
-    # Website
-    website = place.get("website") or place.get("url") or ""
+    website = clean_google_maps_value(place.get("website"))
     if website:
-        lines.append(f"🌐 網站：{website}")
+        lines.append(f"網站：{website}")
 
-    # Price level
-    price = place.get("price") or place.get("priceLevel") or ""
+    maps_url = clean_google_maps_value(
+        place.get("placeUrl") or place.get("googleMapsUrl") or place.get("url") or place.get("searchPageUrl")
+    )
+    if maps_url:
+        lines.append(f"Google Maps URL：{maps_url}")
+
+    price = clean_google_maps_value(place.get("price") or place.get("priceLevel"))
     if price:
-        lines.append(f"💰 價位：{price}")
+        lines.append(f"價位：{price}")
 
-    # Opening hours
-    hours = place.get("openingHours")
+    hours = place.get("openingHours") or place.get("hours")
     if hours:
         if isinstance(hours, list):
-            lines.append("🕐 營業時間：")
-            for h in hours[:7]:
-                if isinstance(h, dict):
-                    day = h.get("day", "")
-                    time_str = h.get("hours", "")
-                    lines.append(f"  • {day}：{time_str}")
-                elif isinstance(h, str):
-                    lines.append(f"  • {h}")
-        elif isinstance(hours, str):
-            lines.append(f"🕐 營業時間：{hours}")
+            lines.append("營業時間：")
+            for item in hours[:7]:
+                if isinstance(item, dict):
+                    day = clean_google_maps_value(item.get("day") or item.get("name"))
+                    time_str = clean_google_maps_value(item.get("hours") or item.get("value") or item.get("time"))
+                    if day and time_str:
+                        lines.append(f"  - {day}：{time_str}")
+                    elif day or time_str:
+                        lines.append(f"  - {day or time_str}")
+                else:
+                    cleaned = clean_google_maps_value(item)
+                    if cleaned:
+                        lines.append(f"  - {cleaned}")
+        else:
+            cleaned_hours = clean_google_maps_value(hours)
+            if cleaned_hours:
+                lines.append(f"營業時間：{cleaned_hours}")
 
-    # Description
-    description = place.get("description") or ""
+    description = clean_google_maps_value(place.get("description"))
     if description:
-        lines.append(f"\n📝 簡介：{description}")
+        lines.extend(["", f"簡介：{description}"])
 
-    # Location coordinates
-    lat = place.get("location", {}).get("lat") or place.get("latitude")
-    lng = place.get("location", {}).get("lng") or place.get("longitude")
+    plus_code = clean_google_maps_value(place.get("plusCode"))
+    if plus_code:
+        lines.append(f"Plus Code：{plus_code}")
+
+    location = place.get("location") if isinstance(place.get("location"), dict) else {}
+    lat = location.get("lat") or place.get("latitude")
+    lng = location.get("lng") or place.get("longitude")
     if lat and lng:
-        lines.append(f"🗺️ 座標：{lat}, {lng}")
+        lines.append(f"座標：{lat}, {lng}")
 
-    # Additional info
+    distribution = place.get("reviewsDistribution")
+    if isinstance(distribution, dict) and distribution:
+        lines.append("評論分布：")
+        for key, value in list(distribution.items())[:5]:
+            cleaned = clean_google_maps_value(value)
+            if cleaned:
+                lines.append(f"  - {key}：{cleaned}")
+
+    reviews = place.get("reviews")
+    if isinstance(reviews, list) and reviews:
+        lines.append("評論摘錄：")
+        for review in reviews[:3]:
+            if not isinstance(review, dict):
+                cleaned = clean_google_maps_value(review)
+                if cleaned:
+                    lines.append(f"  - {cleaned[:300]}")
+                continue
+            author = clean_google_maps_value(review.get("name") or review.get("authorName") or review.get("reviewerName"))
+            stars = clean_google_maps_value(review.get("stars") or review.get("rating"))
+            date = clean_google_maps_value(review.get("publishedAtDate") or review.get("date") or review.get("publishedAt"))
+            text = clean_google_maps_value(review.get("text") or review.get("reviewText") or review.get("snippet"))
+            pieces = []
+            if author:
+                pieces.append(author)
+            if stars:
+                pieces.append(f"{stars}/5")
+            if date:
+                pieces.append(date)
+            prefix = "，".join(pieces)
+            if text:
+                lines.append(f"  - {prefix}：{text[:300]}" if prefix else f"  - {text[:300]}")
+            elif prefix:
+                lines.append(f"  - {prefix}")
+
     additional = place.get("additionalInfo") or place.get("additionalCategories")
-    if additional and isinstance(additional, dict):
+    if isinstance(additional, dict):
         for key, value in list(additional.items())[:5]:
-            if value:
-                lines.append(f"ℹ️ {key}：{value}")
+            cleaned = clean_google_maps_value(value)
+            if cleaned:
+                lines.append(f"{key}：{cleaned}")
+    elif isinstance(additional, list):
+        cleaned = clean_google_maps_value(additional)
+        if cleaned:
+            lines.append(f"補充資訊：{cleaned}")
 
     return "\n".join(lines)
 
@@ -744,10 +838,13 @@ def assess_google_maps_place_data(place: dict | None) -> dict:
     address = place.get("address") or place.get("street")
     rating = place.get("totalScore") or place.get("rating") or place.get("stars")
     phone = place.get("phone") or place.get("phoneUnformatted")
-    website = place.get("website") or place.get("url")
+    website = place.get("website")
+    maps_url = place.get("placeUrl") or place.get("googleMapsUrl") or place.get("url") or place.get("searchPageUrl")
     price = place.get("price") or place.get("priceLevel")
     hours = place.get("openingHours")
     description = place.get("description")
+    reviews_count = get_google_maps_review_count(place)
+    plus_code = place.get("plusCode")
     location = place.get("location") if isinstance(place.get("location"), dict) else {}
     has_coords = bool(
         (location.get("lat") and location.get("lng")) or
@@ -763,6 +860,9 @@ def assess_google_maps_place_data(place: dict | None) -> dict:
         hours,
         description,
         has_coords,
+        reviews_count,
+        maps_url,
+        plus_code,
     ])
 
     if not name and detail_score < 2:
@@ -1069,14 +1169,14 @@ def extract_youtube_video_id(url: str) -> str:
     host = parsed.netloc.lower()
     path_parts = [part for part in parsed.path.split("/") if part]
     if host.endswith("youtu.be") and path_parts:
-        return path_parts[0]
+        return re.sub(r'[^A-Za-z0-9_-]', '', path_parts[0])
     if "youtube.com" not in host:
         return ""
     query = parse_qs(parsed.query)
     if query.get("v"):
-        return query["v"][0]
+        return re.sub(r'[^A-Za-z0-9_-]', '', query["v"][0])
     if len(path_parts) >= 2 and path_parts[0] in ["embed", "shorts", "live"]:
-        return path_parts[1]
+        return re.sub(r'[^A-Za-z0-9_-]', '', path_parts[1])
     return ""
 
 
@@ -1108,7 +1208,10 @@ def extract_balanced_json(text: str, start_index: int) -> str:
 
 
 def extract_yt_initial_player_response(html_text: str) -> dict:
-    marker_match = re.search(r'ytInitialPlayerResponse\s*=', html_text or "")
+    marker_match = re.search(
+        r'(?:ytInitialPlayerResponse|window\["ytInitialPlayerResponse"\]|window\[\'ytInitialPlayerResponse\'\])\s*=',
+        html_text or "",
+    )
     if not marker_match:
         return {}
     json_start = (html_text or "").find("{", marker_match.end())
@@ -1120,6 +1223,45 @@ def extract_yt_initial_player_response(html_text: str) -> dict:
     except Exception as e:
         print(f"[DEBUG] YouTube player response parse failed: {str(e)}")
         return {}
+
+
+def extract_youtube_text(value) -> str:
+    """Read text from common YouTube renderer payload shapes."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return re.sub(r'\s+', ' ', value).strip()
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        parts = [extract_youtube_text(item) for item in value]
+        return " ".join(part for part in parts if part).strip()
+    if isinstance(value, dict):
+        for key in ["simpleText", "text", "content", "label"]:
+            text = extract_youtube_text(value.get(key))
+            if text:
+                return text
+        runs = value.get("runs")
+        if isinstance(runs, list):
+            return extract_youtube_text([run.get("text") for run in runs if isinstance(run, dict)])
+        accessibility = value.get("accessibilityData")
+        if isinstance(accessibility, dict):
+            return extract_youtube_text(accessibility.get("label"))
+    return ""
+
+
+def format_youtube_duration(seconds_value) -> str:
+    try:
+        seconds = int(float(seconds_value))
+    except (TypeError, ValueError):
+        return extract_youtube_text(seconds_value)
+    if seconds <= 0:
+        return ""
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
 
 
 def choose_youtube_caption_track(player_response: dict) -> dict:
@@ -1201,12 +1343,18 @@ def fetch_youtube_page_data(url: str) -> tuple[dict, str]:
 def fetch_youtube_content(url: str) -> tuple[str, str]:
     """Fetch YouTube metadata and transcript when public captions are available."""
     metadata = {
+        "video_id": extract_youtube_video_id(url),
         "title": "",
         "author_name": "",
         "author_url": "",
         "description": "",
         "publish_date": "",
+        "upload_date": "",
         "length_seconds": "",
+        "view_count": "",
+        "category": "",
+        "channel_id": "",
+        "is_live": "",
     }
     try:
         response = requests.get(
@@ -1233,11 +1381,18 @@ def fetch_youtube_content(url: str) -> tuple[str, str]:
         else {}
     )
     metadata.update({
+        "video_id": metadata["video_id"] or video_details.get("videoId", ""),
         "title": metadata["title"] or video_details.get("title", ""),
-        "author_name": metadata["author_name"] or video_details.get("author", ""),
-        "description": video_details.get("shortDescription", ""),
+        "author_name": metadata["author_name"] or video_details.get("author", "") or microformat.get("ownerChannelName", ""),
+        "author_url": metadata["author_url"] or microformat.get("ownerProfileUrl", ""),
+        "description": video_details.get("shortDescription", "") or extract_youtube_text(microformat.get("description")),
         "publish_date": microformat.get("publishDate", ""),
+        "upload_date": microformat.get("uploadDate", ""),
         "length_seconds": video_details.get("lengthSeconds", ""),
+        "view_count": video_details.get("viewCount", "") or extract_youtube_text(microformat.get("viewCount")),
+        "category": microformat.get("category", ""),
+        "channel_id": video_details.get("channelId", "") or microformat.get("externalChannelId", ""),
+        "is_live": video_details.get("isLiveContent", ""),
     })
 
     transcript = ""
@@ -1245,16 +1400,31 @@ def fetch_youtube_content(url: str) -> tuple[str, str]:
     if caption_track:
         transcript = fetch_youtube_transcript(caption_track.get("baseUrl", ""))
 
-    lines = [
+    lines = []
+    if metadata["video_id"]:
+        lines.append(f"影片 ID：{metadata['video_id']}")
+    lines.extend([
         f"標題：{metadata['title']}",
         f"頻道：{metadata['author_name']}",
         f"頻道網址：{metadata['author_url']}",
         f"影片網址：{canonical_url or url}",
-    ]
+    ])
+    if metadata["channel_id"]:
+        lines.append(f"頻道 ID：{metadata['channel_id']}")
     if metadata["publish_date"]:
         lines.append(f"發布日期：{metadata['publish_date']}")
+    if metadata["upload_date"] and metadata["upload_date"] != metadata["publish_date"]:
+        lines.append(f"上傳日期：{metadata['upload_date']}")
     if metadata["length_seconds"]:
-        lines.append(f"影片長度秒數：{metadata['length_seconds']}")
+        duration = format_youtube_duration(metadata["length_seconds"])
+        length_text = f"{duration}（{metadata['length_seconds']} 秒）" if duration else metadata["length_seconds"]
+        lines.append(f"影片長度：{length_text}")
+    if metadata["view_count"]:
+        lines.append(f"觀看次數：{metadata['view_count']}")
+    if metadata["category"]:
+        lines.append(f"分類：{metadata['category']}")
+    if metadata["is_live"] is True:
+        lines.append("直播狀態：直播內容")
     if metadata["description"]:
         lines.extend(["", "影片描述：", metadata["description"][:1500]])
 

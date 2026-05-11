@@ -1149,6 +1149,16 @@ class TestYouTubeExtractor:
         result = main.extract_yt_initial_player_response(html)
         assert result["videoDetails"]["title"] == "Test Video"
 
+    def test_extract_yt_initial_player_response_window_assignment(self):
+        payload = {"videoDetails": {"title": "Window Video"}}
+        html = f"<script>window[\"ytInitialPlayerResponse\"] = {json.dumps(payload)};</script>"
+        result = main.extract_yt_initial_player_response(html)
+        assert result["videoDetails"]["title"] == "Window Video"
+
+    def test_format_youtube_duration(self):
+        assert main.format_youtube_duration("120") == "2:00"
+        assert main.format_youtube_duration("3661") == "1:01:01"
+
     def test_choose_caption_track_prefers_zh(self):
         player_response = {
             "captions": {
@@ -1186,12 +1196,21 @@ class TestYouTubeExtractor:
         }
         player_payload = {
             "videoDetails": {
+                "videoId": "abc",
                 "title": "Watch Title",
                 "author": "Watch Channel",
                 "shortDescription": "Video description",
                 "lengthSeconds": "120",
+                "viewCount": "12345",
+                "channelId": "UC123",
             },
-            "microformat": {"playerMicroformatRenderer": {"publishDate": "2026-01-01"}},
+            "microformat": {
+                "playerMicroformatRenderer": {
+                    "publishDate": "2026-01-01",
+                    "uploadDate": "2025-12-31",
+                    "category": "Education",
+                }
+            },
             "captions": {
                 "playerCaptionsTracklistRenderer": {
                     "captionTracks": [{"languageCode": "zh-Hant", "baseUrl": "https://example.com/caption"}]
@@ -1213,6 +1232,10 @@ class TestYouTubeExtractor:
         assert "OEmbed Title" in content
         assert "逐字稿內容" in content
         assert "發布日期：2026-01-01" in content
+        assert "影片 ID：abc" in content
+        assert "影片長度：2:00（120 秒）" in content
+        assert "觀看次數：12345" in content
+        assert "分類：Education" in content
 
     @patch("main.requests.get")
     def test_fetch_youtube_content_metadata_only(self, mock_get):
@@ -1532,7 +1555,7 @@ class TestFormatGoogleMapsResult:
         }
         result = main.format_google_maps_result(place)
         assert "某地點" in result
-        assert "📍" in result
+        assert "地點名稱" in result
 
     def test_format_with_name_field(self):
         """使用 name 欄位而非 title"""
@@ -1608,6 +1631,29 @@ class TestFormatGoogleMapsResult:
         result = main.format_google_maps_result(place)
         assert "4.2" in result
         assert "50" in result
+
+    def test_format_with_place_url_status_and_reviews(self):
+        place = {
+            "title": "Test Cafe",
+            "placeUrl": "https://maps.google.com/?cid=123",
+            "temporarilyClosed": True,
+            "plusCode": "3JH7+P4",
+            "reviewsDistribution": {"5": 10, "4": 2},
+            "reviews": [
+                {
+                    "name": "Amy",
+                    "stars": 5,
+                    "publishedAtDate": "2026-05-01",
+                    "text": "咖啡很好喝",
+                }
+            ],
+        }
+        result = main.format_google_maps_result(place)
+        assert "Google Maps URL：https://maps.google.com/?cid=123" in result
+        assert "暫停營業" in result
+        assert "Plus Code：3JH7+P4" in result
+        assert "評論分布" in result
+        assert "Amy，5/5，2026-05-01：咖啡很好喝" in result
 
     def test_assess_google_maps_full_place(self):
         place = {
