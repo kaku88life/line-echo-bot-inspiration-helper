@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600" viewBox="0 0 1200 1600">
+  <style>
+    .bg { fill: #f6f8fb; }
+    .title { font: 700 54px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #102033; }
+    .subtitle { font: 400 26px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #4b5b6f; }
+    .section-title { font: 700 30px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #102033; }
+    .body { font: 400 24px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #25364a; }
+    .small { font: 400 21px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #5c6b7a; }
+    .label { font: 700 21px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #0f5e5e; }
+    .card { fill: #ffffff; stroke: #dbe4ef; stroke-width: 2; rx: 24; }
+    .pill { fill: #e8f5f3; rx: 18; }
+    .accent { fill: #0f766e; }
+    .line { stroke: #adc0cf; stroke-width: 3; }
+  </style>
+  <rect class="bg" width="1200" height="1600"/>
+  <text class="title" x="72" y="110">LINE Bot 使用總覽</text>
+  <text class="subtitle" x="72" y="158">核心原則：直接丟內容，Bot 自動判斷並存到 Obsidian。</text>
+
+  <rect class="card" x="72" y="220" width="1056" height="250"/>
+  <text class="section-title" x="112" y="278">主要流程</text>
+  <line class="line" x1="235" y1="365" x2="940" y2="365"/>
+  <circle class="accent" cx="180" cy="365" r="38"/>
+  <text class="body" x="166" y="374" fill="#fff">1</text>
+  <circle class="accent" cx="430" cy="365" r="38"/>
+  <text class="body" x="416" y="374" fill="#fff">2</text>
+  <circle class="accent" cx="680" cy="365" r="38"/>
+  <text class="body" x="666" y="374" fill="#fff">3</text>
+  <circle class="accent" cx="930" cy="365" r="38"/>
+  <text class="body" x="916" y="374" fill="#fff">4</text>
+  <text class="body" x="125" y="432">傳內容</text>
+  <text class="body" x="360" y="432">自動判斷</text>
+  <text class="body" x="618" y="432">保存筆記</text>
+  <text class="body" x="858" y="432">回顧整理</text>
+
+  <rect class="card" x="72" y="525" width="505" height="365"/>
+  <rect class="pill" x="112" y="565" width="145" height="42"/>
+  <text class="label" x="132" y="594">文字筆記</text>
+  <text class="section-title" x="112" y="655">直接輸入想法或資料</text>
+  <text class="body" x="112" y="714">例：今天想到一個產品定位...</text>
+  <text class="small" x="112" y="770">Bot 會產生摘要、分類、關鍵字，</text>
+  <text class="small" x="112" y="812">並把原文一起存入 Sources。</text>
+
+  <rect class="card" x="623" y="525" width="505" height="365"/>
+  <rect class="pill" x="663" y="565" width="145" height="42"/>
+  <text class="label" x="683" y="594">網址保存</text>
+  <text class="section-title" x="663" y="655">直接貼網址</text>
+  <text class="body" x="663" y="714">支援網頁、YouTube、地圖、</text>
+  <text class="body" x="663" y="754">PTT、104、Facebook、Threads。</text>
+  <text class="small" x="663" y="812">抓取不足時會存成待確認筆記。</text>
+
+  <rect class="card" x="72" y="945" width="505" height="365"/>
+  <rect class="pill" x="112" y="985" width="145" height="42"/>
+  <text class="label" x="132" y="1014">圖片</text>
+  <text class="section-title" x="112" y="1075">傳圖片給 Bot</text>
+  <text class="body" x="112" y="1134">一般狀態：圖片分析。</text>
+  <text class="body" x="112" y="1174">翻譯模式中：辨識圖片文字並翻譯。</text>
+  <text class="small" x="112" y="1232">結果會保存為圖片分析或翻譯筆記。</text>
+
+  <rect class="card" x="623" y="945" width="505" height="365"/>
+  <rect class="pill" x="663" y="985" width="145" height="42"/>
+  <text class="label" x="683" y="1014">語音</text>
+  <text class="section-title" x="663" y="1075">傳 LINE 語音訊息</text>
+  <text class="body" x="663" y="1134">Bot 會轉文字，再摘要保存。</text>
+  <text class="small" x="663" y="1192">適合快速記錄路上的想法。</text>
+
+  <rect class="card" x="72" y="1370" width="1056" height="130"/>
+  <text class="section-title" x="112" y="1428">調整後的互動原則</text>
+  <text class="body" x="112" y="1478">一般保存完成後不再自動跳一排按鈕。只有需要你做選擇時才顯示按鈕。</text>
+</svg>

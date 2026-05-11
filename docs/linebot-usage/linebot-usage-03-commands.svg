@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600" viewBox="0 0 1200 1600">
+  <style>
+    .bg { fill: #f4f7f9; }
+    .title { font: 700 54px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #12263a; }
+    .subtitle { font: 400 26px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #536475; }
+    .card { fill: #ffffff; stroke: #d9e2ea; stroke-width: 2; rx: 22; }
+    .head { font: 700 30px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #12263a; }
+    .body { font: 400 23px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #26384c; }
+    .code { font: 700 23px "Consolas", "Microsoft JhengHei", sans-serif; fill: #0f5b50; }
+    .note { font: 400 20px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #627386; }
+  </style>
+  <rect class="bg" width="1200" height="1600"/>
+  <text class="title" x="72" y="110">LINE Bot 指令速查</text>
+  <text class="subtitle" x="72" y="158">大多數時候直接傳內容即可。以下是需要明確指令時的用法。</text>
+
+  <rect class="card" x="72" y="230" width="1056" height="210"/>
+  <text class="head" x="112" y="292">翻譯</text>
+  <text class="code" x="112" y="350">翻譯成英文：請把這段文字翻譯過去</text>
+  <text class="code" x="112" y="395">翻譯成日文：今天的會議重點</text>
+  <text class="note" x="112" y="435">輸入「翻譯」會進入連續翻譯模式，適合一次翻很多段。</text>
+
+  <rect class="card" x="72" y="485" width="505" height="295"/>
+  <text class="head" x="112" y="547">回顧</text>
+  <text class="code" x="112" y="605">今日回顧</text>
+  <text class="code" x="112" y="650">本週回顧</text>
+  <text class="code" x="112" y="695">消化狀態</text>
+  <text class="note" x="112" y="748">查看最近保存了哪些筆記，以及 full、partial、failed 狀態。</text>
+
+  <rect class="card" x="623" y="485" width="505" height="295"/>
+  <text class="head" x="663" y="547">搜尋知識庫</text>
+  <text class="code" x="663" y="605">查 AI</text>
+  <text class="code" x="663" y="650">搜尋 投資</text>
+  <text class="code" x="663" y="695">找 日本旅遊</text>
+  <text class="note" x="663" y="748">搜尋 Sources 裡的筆記，並整理找到的重點。</text>
+
+  <rect class="card" x="72" y="835" width="505" height="295"/>
+  <text class="head" x="112" y="897">整理與補充</text>
+  <text class="code" x="112" y="955">整理本週</text>
+  <text class="code" x="112" y="1000">整理筆記</text>
+  <text class="code" x="112" y="1045">補充想法：這段加到上一則筆記</text>
+  <text class="note" x="112" y="1098">補充想法會加到最近一筆保存成功的筆記。</text>
+
+  <rect class="card" x="623" y="835" width="505" height="295"/>
+  <text class="head" x="663" y="897">社群多篇爬取</text>
+  <text class="code" x="663" y="955">爬 5 篇 https://...</text>
+  <text class="code" x="663" y="1000">爬取 3 篇 https://...</text>
+  <text class="note" x="663" y="1053">也可以直接貼粉專或個人頁網址，再選 3、5、10、20 篇。</text>
+
+  <rect class="card" x="72" y="1185" width="505" height="260"/>
+  <text class="head" x="112" y="1247">行程</text>
+  <text class="code" x="112" y="1305">今天行程</text>
+  <text class="code" x="112" y="1350">這週行程</text>
+  <text class="code" x="112" y="1395">加行程：週五下午三點開會</text>
+
+  <rect class="card" x="623" y="1185" width="505" height="260"/>
+  <text class="head" x="663" y="1247">聯絡人</text>
+  <text class="code" x="663" y="1305">加聯絡人：Jason ABC 公司</text>
+  <text class="code" x="663" y="1350">問：我之前存過什麼 AI 筆記？</text>
+  <text class="note" x="663" y="1403">問句可以直接查知識庫並整理回答。</text>
+</svg>

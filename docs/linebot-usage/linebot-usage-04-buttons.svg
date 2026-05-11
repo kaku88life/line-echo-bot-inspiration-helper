@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600" viewBox="0 0 1200 1600">
+  <style>
+    .bg { fill: #f5f6fa; }
+    .title { font: 700 54px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #172033; }
+    .subtitle { font: 400 26px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #5d6878; }
+    .card { fill: #ffffff; stroke: #dfe5ee; stroke-width: 2; rx: 24; }
+    .head { font: 700 31px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #172033; }
+    .body { font: 400 24px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #29394f; }
+    .small { font: 400 21px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #647287; }
+    .ok { fill: #e9f7ef; stroke: #a6d8ba; stroke-width: 2; rx: 18; }
+    .quiet { fill: #f0f2f5; stroke: #d5dce5; stroke-width: 2; rx: 18; }
+    .tagok { font: 700 22px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #236143; }
+    .tagquiet { font: 700 22px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #596576; }
+  </style>
+  <rect class="bg" width="1200" height="1600"/>
+  <text class="title" x="72" y="110">按鈕顯示規則</text>
+  <text class="subtitle" x="72" y="158">調整後：按鈕只在需要選擇時出現，不再干擾一般 capture。</text>
+
+  <rect class="card" x="72" y="230" width="1056" height="440"/>
+  <text class="head" x="112" y="292">會保留按鈕的情境</text>
+  <rect class="ok" x="112" y="340" width="300" height="90"/>
+  <text class="tagok" x="142" y="375">翻譯語言選擇</text>
+  <text class="small" x="142" y="410">輸入「翻譯」後選語言</text>
+  <rect class="ok" x="450" y="340" width="300" height="90"/>
+  <text class="tagok" x="480" y="375">社群頁面篇數</text>
+  <text class="small" x="480" y="410">選 3、5、10、20 篇</text>
+  <rect class="ok" x="788" y="340" width="300" height="90"/>
+  <text class="tagok" x="818" y="375">翻譯模式控制</text>
+  <text class="small" x="818" y="410">取消或切換語言</text>
+  <rect class="ok" x="112" y="470" width="300" height="90"/>
+  <text class="tagok" x="142" y="505">行程查詢</text>
+  <text class="small" x="142" y="540">今天、這週、加行程</text>
+  <rect class="ok" x="450" y="470" width="300" height="90"/>
+  <text class="tagok" x="480" y="505">新增行程後</text>
+  <text class="small" x="480" y="540">查行程或再加一個</text>
+  <rect class="ok" x="788" y="470" width="300" height="90"/>
+  <text class="tagok" x="818" y="505">新增聯絡人後</text>
+  <text class="small" x="818" y="540">再加一位或搜尋</text>
+
+  <rect class="card" x="72" y="740" width="1056" height="440"/>
+  <text class="head" x="112" y="802">不再顯示按鈕的情境</text>
+  <rect class="quiet" x="112" y="850" width="300" height="90"/>
+  <text class="tagquiet" x="142" y="885">文字摘要完成</text>
+  <text class="small" x="142" y="920">回覆結果後安靜結束</text>
+  <rect class="quiet" x="450" y="850" width="300" height="90"/>
+  <text class="tagquiet" x="480" y="885">網址保存完成</text>
+  <text class="small" x="480" y="920">不再提示補充或標記</text>
+  <rect class="quiet" x="788" y="850" width="300" height="90"/>
+  <text class="tagquiet" x="818" y="885">圖片分析完成</text>
+  <text class="small" x="818" y="920">保存後不跳下一步</text>
+  <rect class="quiet" x="112" y="980" width="300" height="90"/>
+  <text class="tagquiet" x="142" y="1015">語音筆記完成</text>
+  <text class="small" x="142" y="1050">轉寫摘要後安靜結束</text>
+  <rect class="quiet" x="450" y="980" width="300" height="90"/>
+  <text class="tagquiet" x="480" y="1015">今日與本週回顧</text>
+  <text class="small" x="480" y="1050">看完後自行輸入下一步</text>
+  <rect class="quiet" x="788" y="980" width="300" height="90"/>
+  <text class="tagquiet" x="818" y="1015">搜尋與整理結果</text>
+  <text class="small" x="818" y="1050">避免半成品指令干擾</text>
+
+  <rect class="card" x="72" y="1260" width="1056" height="190"/>
+  <text class="head" x="112" y="1320">你需要做什麼</text>
+  <text class="body" x="112" y="1380">一般情況：直接傳文字、網址、圖片或語音。</text>
+  <text class="body" x="112" y="1425">需要管理：輸入明確指令，例如「今日回顧」、「查 AI」、「整理本週」。</text>
+</svg>

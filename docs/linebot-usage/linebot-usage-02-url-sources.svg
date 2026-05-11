@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600" viewBox="0 0 1200 1600">
+  <style>
+    .bg { fill: #f7f5ef; }
+    .title { font: 700 54px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #14213d; }
+    .subtitle { font: 400 26px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #55606d; }
+    .card { fill: #ffffff; stroke: #ded8ca; stroke-width: 2; rx: 22; }
+    .head { font: 700 31px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #14213d; }
+    .body { font: 400 23px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #24364a; }
+    .small { font: 400 20px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #657080; }
+    .tag { fill: #edf7e8; rx: 16; }
+    .tagtext { font: 700 19px "Microsoft JhengHei", "Noto Sans TC", sans-serif; fill: #356b2f; }
+  </style>
+  <rect class="bg" width="1200" height="1600"/>
+  <text class="title" x="72" y="110">網址 Capture 支援範圍</text>
+  <text class="subtitle" x="72" y="158">把網址直接丟進 LINE，Bot 會依來源選擇合適的 extractor。</text>
+
+  <rect class="card" x="72" y="230" width="500" height="280"/>
+  <rect class="tag" x="112" y="270" width="170" height="38"/>
+  <text class="tagtext" x="132" y="296">YouTube</text>
+  <text class="head" x="112" y="360">影片與逐字稿</text>
+  <text class="body" x="112" y="418">保存標題、頻道、影片 ID、</text>
+  <text class="body" x="112" y="456">發布日期、長度、觀看數、分類。</text>
+  <text class="small" x="112" y="510">有公開字幕時會一起保存逐字稿。</text>
+
+  <rect class="card" x="628" y="230" width="500" height="280"/>
+  <rect class="tag" x="668" y="270" width="190" height="38"/>
+  <text class="tagtext" x="688" y="296">Google Maps</text>
+  <text class="head" x="668" y="360">地點資料</text>
+  <text class="body" x="668" y="418">保存地址、評分、電話、網站、</text>
+  <text class="body" x="668" y="456">營業時間、座標、評論摘錄。</text>
+  <text class="small" x="668" y="510">短網址會先解析成正式地圖網址。</text>
+
+  <rect class="card" x="72" y="570" width="500" height="280"/>
+  <rect class="tag" x="112" y="610" width="130" height="38"/>
+  <text class="tagtext" x="132" y="636">PTT</text>
+  <text class="head" x="112" y="700">文章頁</text>
+  <text class="body" x="112" y="758">保存看板、標題、作者、時間、</text>
+  <text class="body" x="112" y="796">本文與推文摘錄。</text>
+  <text class="small" x="112" y="850">如果本文抓不到，會存待確認筆記。</text>
+
+  <rect class="card" x="628" y="570" width="500" height="280"/>
+  <rect class="tag" x="668" y="610" width="130" height="38"/>
+  <text class="tagtext" x="688" y="636">104</text>
+  <text class="head" x="668" y="700">職缺頁</text>
+  <text class="body" x="668" y="758">保存職稱、公司、地點、薪資、</text>
+  <text class="body" x="668" y="796">工作內容、要求、福利與聯絡資訊。</text>
+  <text class="small" x="668" y="850">使用 104 ajax 資料優先於一般網頁。</text>
+
+  <rect class="card" x="72" y="910" width="500" height="320"/>
+  <rect class="tag" x="112" y="950" width="240" height="38"/>
+  <text class="tagtext" x="132" y="976">Facebook / Threads</text>
+  <text class="head" x="112" y="1040">社群貼文</text>
+  <text class="body" x="112" y="1098">單篇貼文：直接抓取保存。</text>
+  <text class="body" x="112" y="1136">粉專或個人頁：會詢問要抓幾篇。</text>
+  <text class="small" x="112" y="1190">保存帳號、內文、互動數、圖片與 OCR。</text>
+
+  <rect class="card" x="628" y="910" width="500" height="320"/>
+  <rect class="tag" x="668" y="950" width="170" height="38"/>
+  <text class="tagtext" x="688" y="976">一般網頁</text>
+  <text class="head" x="668" y="1040">文章與頁面</text>
+  <text class="body" x="668" y="1098">一般網址會用網頁內容抽取器。</text>
+  <text class="body" x="668" y="1136">再由 AI 產生摘要、分類與關鍵字。</text>
+  <text class="small" x="668" y="1190">內容不足時改存 status note。</text>
+
+  <rect class="card" x="72" y="1300" width="1056" height="150"/>
+  <text class="head" x="112" y="1360">捕捉狀態</text>
+  <text class="body" x="112" y="1415">full：內容完整可整理。partial：有資料但需要人工確認。failed：保存原始網址與失敗原因。</text>
+</svg>

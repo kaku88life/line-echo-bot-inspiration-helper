@@ -3373,11 +3373,6 @@ def handle_text_message(event):
             line_bot_api.reply_message_with_http_info(
                 ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(
                     text=reply_text,
-                    quick_reply=QuickReply(items=[
-                        QuickReplyItem(action=MessageAction(label="🔍 搜尋筆記", text="查 ")),
-                        QuickReplyItem(action=MessageAction(label="📂 整理筆記", text="整理筆記")),
-                        QuickReplyItem(action=MessageAction(label="💭 補充想法", text="補充想法：")),
-                    ])
                 )])
             )
             return
@@ -3390,11 +3385,6 @@ def handle_text_message(event):
             line_bot_api.reply_message_with_http_info(
                 ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(
                     text=reply_text,
-                    quick_reply=QuickReply(items=[
-                        QuickReplyItem(action=MessageAction(label="整理本週", text="整理本週")),
-                        QuickReplyItem(action=MessageAction(label="今日回顧", text="今日回顧")),
-                        QuickReplyItem(action=MessageAction(label="搜尋筆記", text="查 ")),
-                    ])
                 )])
             )
             return
@@ -3448,13 +3438,7 @@ def handle_text_message(event):
             if last and extra:
                 success = append_to_gdrive_file(last["file_id"], extra)
                 if success:
-                    reply_msg = TextMessage(
-                        text=f"✅ 已補充到「{last['title']}」\n\n💭 {extra}",
-                        quick_reply=QuickReply(items=[
-                            QuickReplyItem(action=MessageAction(label="再補充一點", text="補充想法：")),
-                            QuickReplyItem(action=MessageAction(label="📚 今日回顧", text="今日回顧")),
-                        ])
-                    )
+                    reply_msg = TextMessage(text=f"✅ 已補充到「{last['title']}」\n\n💭 {extra}")
                 else:
                     reply_msg = TextMessage(text="❌ 補充失敗，請稍後再試")
             else:
@@ -3495,13 +3479,7 @@ def handle_text_message(event):
                     with ApiClient(configuration) as push_client:
                         MessagingApi(push_client).push_message(PushMessageRequest(
                             to=uid,
-                            messages=[TextMessage(
-                                text=result_text,
-                                quick_reply=QuickReply(items=[
-                                    QuickReplyItem(action=MessageAction(label="📚 今日回顧", text="今日回顧")),
-                                    QuickReplyItem(action=MessageAction(label="整理筆記", text="整理筆記")),
-                                ])
-                            )]
+                            messages=[TextMessage(text=result_text)]
                         ))
                 except Exception as ex:
                     print(f"[DEBUG] Search async error: {str(ex)}")
@@ -3551,13 +3529,7 @@ def handle_text_message(event):
                     with ApiClient(configuration) as push_client:
                         MessagingApi(push_client).push_message(PushMessageRequest(
                             to=uid,
-                            messages=[TextMessage(
-                                text=result_text,
-                                quick_reply=QuickReply(items=[
-                                    QuickReplyItem(action=MessageAction(label="📚 今日回顧", text="今日回顧")),
-                                    QuickReplyItem(action=MessageAction(label="🔍 搜尋筆記", text="查 ")),
-                                ])
-                            )]
+                            messages=[TextMessage(text=result_text)]
                         ))
                 except Exception as ex:
                     print(f"[DEBUG] Consolidate async error: {str(ex)}")
@@ -3788,14 +3760,7 @@ def handle_text_message(event):
                     with ApiClient(configuration) as push_client:
                         MessagingApi(push_client).push_message(PushMessageRequest(
                             to=uid,
-                            messages=[TextMessage(
-                                text=f"🧠 根據你的知識庫\n\n{result}",
-                                quick_reply=QuickReply(items=[
-                                    QuickReplyItem(action=MessageAction(label="💭 補充想法", text="補充想法：")),
-                                    QuickReplyItem(action=MessageAction(label="🔍 再搜尋", text="查 ")),
-                                    QuickReplyItem(action=MessageAction(label="📂 整理筆記", text="整理筆記")),
-                                ])
-                            )]
+                            messages=[TextMessage(text=f"🧠 根據你的知識庫\n\n{result}")]
                         ))
                 except Exception as ex:
                     print(f"[DEBUG] Answer async error: {str(ex)}")
@@ -4437,14 +4402,7 @@ def handle_text_message(event):
                             push_api = MessagingApi(push_client)
                             push_api.push_message(PushMessageRequest(
                                 to=uid,
-                                messages=[TextMessage(
-                                    text=f"網址已保存\n抓取狀態：{quality['status']}\n來源類型：{source_type_from_url(u)}\n\n{(parsed_url['title'] or '完整內容已存入 Obsidian')}",
-                                    quick_reply=QuickReply(items=[
-                                        QuickReplyItem(action=MessageAction(label="💭 補充想法", text="補充想法：")),
-                                        QuickReplyItem(action=MessageAction(label="📚 今日回顧", text="今日回顧")),
-                                        QuickReplyItem(action=MessageAction(label="⭐ 標記重要", text="補充想法：⭐ 重要")),
-                                    ])
-                                )]
+                                messages=[TextMessage(text=f"網址已保存\n抓取狀態：{quality['status']}\n來源類型：{source_type_from_url(u)}\n\n{(parsed_url['title'] or '完整內容已存入 Obsidian')}")]
                             ))
                         print(f"[DEBUG] URL summary pushed successfully")
                     except Exception as ex:
@@ -4476,14 +4434,7 @@ def handle_text_message(event):
                 line_bot_api.reply_message_with_http_info(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
-                        messages=[TextMessage(
-                            text=f"📝 文字摘要\n\n{summary}",
-                            quick_reply=QuickReply(items=[
-                                QuickReplyItem(action=MessageAction(label="💭 補充想法", text="補充想法：")),
-                                QuickReplyItem(action=MessageAction(label="📚 今日回顧", text="今日回顧")),
-                                QuickReplyItem(action=MessageAction(label="⭐ 標記重要", text="補充想法：⭐ 重要")),
-                            ])
-                        )],
+                        messages=[TextMessage(text=f"📝 文字摘要\n\n{summary}")],
                     )
                 )
                 parsed = parse_summary_response(summary)
@@ -4700,14 +4651,7 @@ def handle_image_message(event):
             line_bot_api.reply_message_with_http_info(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
-                    messages=[TextMessage(
-                        text=f"🖼️ 圖片分析\n\n{result}",
-                        quick_reply=QuickReply(items=[
-                            QuickReplyItem(action=MessageAction(label="💭 補充想法", text="補充想法：")),
-                            QuickReplyItem(action=MessageAction(label="📚 今日回顧", text="今日回顧")),
-                            QuickReplyItem(action=MessageAction(label="⭐ 標記重要", text="補充想法：⭐ 重要")),
-                        ])
-                    )],
+                    messages=[TextMessage(text=f"🖼️ 圖片分析\n\n{result}")],
                 )
             )
             print(f"[DEBUG] Image analysis sent successfully")
@@ -4801,13 +4745,7 @@ def handle_audio_message(event):
             line_bot_api.reply_message_with_http_info(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
-                    messages=[TextMessage(
-                        text=reply_text,
-                        quick_reply=QuickReply(items=[
-                            QuickReplyItem(action=MessageAction(label="💭 補充想法", text="補充想法：")),
-                            QuickReplyItem(action=MessageAction(label="✅ 完成", text="完成")),
-                        ])
-                    )],
+                    messages=[TextMessage(text=reply_text)],
                 )
             )
 
