@@ -1236,6 +1236,115 @@ class TestYouTubeExtractor:
 
 
 # ============================================================
+# 14.3 PTT extractor 測試
+# ============================================================
+
+class TestPTTExtractor:
+    """測試 PTT 文章抽取與清理"""
+
+    SAMPLE_HTML = """
+    <html>
+      <head><meta property="og:title" content="[問卦] 備用標題" /></head>
+      <body>
+        <div id="main-content">
+          <div class="article-metaline">
+            <span class="article-meta-tag">作者</span>
+            <span class="article-meta-value">tester (測試者)</span>
+          </div>
+          <div class="article-metaline">
+            <span class="article-meta-tag">標題</span>
+            <span class="article-meta-value">[問卦] PTT 抽取器測試</span>
+          </div>
+          <div class="article-metaline">
+            <span class="article-meta-tag">時間</span>
+            <span class="article-meta-value">Tue May 12 01:23:45 2026</span>
+          </div>
+          這是第一段本文，應該被保留下來。
+          這是第二段本文，也應該保留下來，方便後續摘要。
+          <div class="push">
+            <span class="push-tag">推 </span>
+            <span class="push-userid">user1</span>
+            <span class="push-content">: 推文內容一</span>
+            <span class="push-ipdatetime">05/12 01:24</span>
+          </div>
+          <div class="push">
+            <span class="push-tag">噓 </span>
+            <span class="push-userid">user2</span>
+            <span class="push-content">: 反對意見</span>
+            <span class="push-ipdatetime">05/12 01:25</span>
+          </div>
+          --
+          簽名檔不應該進入本文
+          ※ 發信站: 批踢踢實業坊(ptt.cc)
+          ※ 文章網址: https://www.ptt.cc/bbs/Gossiping/M.123.A.456.html
+        </div>
+      </body>
+    </html>
+    """
+
+    def test_parse_ptt_article_html(self):
+        result = main.parse_ptt_article_html(
+            self.SAMPLE_HTML,
+            "https://www.ptt.cc/bbs/Gossiping/M.123.A.456.html",
+        )
+
+        assert result["board"] == "Gossiping"
+        assert result["article_id"] == "M.123.A.456.html"
+        assert result["author"] == "tester (測試者)"
+        assert result["title"] == "[問卦] PTT 抽取器測試"
+        assert "第一段本文" in result["body"]
+        assert "推文內容一" not in result["body"]
+        assert "簽名檔" not in result["body"]
+        assert result["push_counts"]["推"] == 1
+        assert result["push_counts"]["噓"] == 1
+
+    def test_format_ptt_article(self):
+        article = main.parse_ptt_article_html(
+            self.SAMPLE_HTML,
+            "https://www.ptt.cc/bbs/Gossiping/M.123.A.456.html",
+        )
+        result = main.format_ptt_article(article)
+
+        assert "看板：Gossiping" in result
+        assert "標題：[問卦] PTT 抽取器測試" in result
+        assert "## 本文" in result
+        assert "## 推文統計" in result
+        assert "- 推：1" in result
+        assert "- 噓：1" in result
+        assert "user1: 推文內容一" in result
+
+    @patch("main.requests.get")
+    def test_fetch_ptt_content_uses_over18_cookie(self, mock_get):
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.text = self.SAMPLE_HTML
+        mock_get.return_value = response
+
+        content, extractor = main.fetch_ptt_content("https://www.ptt.cc/bbs/Gossiping/M.123.A.456.html")
+
+        assert extractor == "ptt-html"
+        assert "PTT 抽取器測試" in content
+        assert mock_get.call_args.kwargs["cookies"] == {"over18": "1"}
+
+    def test_assess_ptt_missing_body_partial(self):
+        content = "\n".join([
+            "標題：[問卦] 空本文",
+            "",
+            "## 本文",
+            "（未抓到本文內容）",
+            "",
+            "## 推文統計",
+            "- 推：3",
+        ])
+
+        result = main.assess_url_capture_quality(content, "ptt", "ptt-html")
+
+        assert result["status"] == main.CAPTURE_STATUS_PARTIAL
+        assert result["needs_review"] is True
+        assert result["reason"] == "ptt_body_missing"
+
+
+# ============================================================
 # 14.5 Google Maps 格式化測試
 # ============================================================
 
@@ -1372,6 +1481,9 @@ class TestFormatGoogleMapsResult:
 
     def test_status_note_only_for_google_maps_partial(self):
         assert main.should_save_status_note_only("google_maps", main.CAPTURE_STATUS_PARTIAL) is True
+
+    def test_status_note_only_for_ptt_partial(self):
+        assert main.should_save_status_note_only("ptt", main.CAPTURE_STATUS_PARTIAL) is True
 
 
 # ============================================================

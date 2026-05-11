@@ -48,6 +48,17 @@ or regulations should be lightly normalized only.
 - LINE replies should stay short; the full extraction, raw input, and status live
   in Obsidian.
 
+## PTT Capture Rules
+
+- PTT article URLs should use the `ptt-html` extractor before generic webpage
+  fallback.
+- Extract and preserve board, article id, title, author, publish time, body,
+  push counts, and a bounded push-comment excerpt.
+- Remove PTT navigation, system footer lines, signature blocks, scripts, styles,
+  and raw push DOM noise from the article body.
+- If the article body is missing, save a `capture_status: partial` status note
+  with `needs_review: true` instead of generating a normal summary.
+
 ## Web Clipper Rules
 
 - Obsidian Web Clipper is the manual browser-capture path for pages the user is

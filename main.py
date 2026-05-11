@@ -347,6 +347,15 @@ def assess_url_capture_quality(content: str, source_type: str, extractor: str) -
                 "needs_review": True,
                 "reason": "youtube_metadata_only",
             }
+    if source_type == "ptt" and extractor == "ptt-html":
+        body_match = re.search(r"## 本文\s*(.+?)(?:\n\n## 推文統計|\Z)", content or "", re.DOTALL)
+        body_text = body_match.group(1).strip() if body_match else ""
+        if not body_text or body_text == "（未抓到本文內容）":
+            return {
+                "status": CAPTURE_STATUS_PARTIAL,
+                "needs_review": True,
+                "reason": "ptt_body_missing",
+            }
 
     return quality
 
@@ -407,7 +416,7 @@ def source_type_from_url(url: str) -> str:
 
 def should_save_status_note_only(source_type: str, status: str) -> bool:
     return status == CAPTURE_STATUS_FAILED or (
-        source_type in ["youtube", "google_maps"] and status == CAPTURE_STATUS_PARTIAL
+        source_type in ["youtube", "google_maps", "ptt"] and status == CAPTURE_STATUS_PARTIAL
     )
 
 
@@ -1238,22 +1247,132 @@ def fetch_youtube_content(url: str) -> tuple[str, str]:
     return fallback, "jina"
 
 
+def parse_ptt_article_html(html_text: str, url: str = "") -> dict:
+    """Parse a PTT article page into metadata, body, and push comments."""
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    main_content = soup.select_one("#main-content")
+    if not main_content:
+        return {}
+
+    metadata = {}
+    for metaline in main_content.select(".article-metaline"):
+        tag = metaline.select_one(".article-meta-tag")
+        value = metaline.select_one(".article-meta-value")
+        if tag and value:
+            metadata[tag.get_text(strip=True)] = value.get_text(" ", strip=True)
+
+    parsed_url = urlparse(url or "")
+    path_parts = [part for part in parsed_url.path.split("/") if part]
+    board = path_parts[1] if len(path_parts) >= 2 and path_parts[0].lower() == "bbs" else ""
+    article_id = path_parts[2] if len(path_parts) >= 3 else ""
+
+    pushes = []
+    push_counts = {"推": 0, "噓": 0, "→": 0}
+    for push in main_content.select(".push"):
+        tag = push.select_one(".push-tag")
+        user = push.select_one(".push-userid")
+        content = push.select_one(".push-content")
+        datetime_text = push.select_one(".push-ipdatetime")
+        tag_text = (tag.get_text(strip=True) if tag else "").strip()
+        if tag_text.startswith("推"):
+            tag_key = "推"
+        elif tag_text.startswith("噓"):
+            tag_key = "噓"
+        else:
+            tag_key = "→"
+        push_counts[tag_key] += 1
+        content_text = content.get_text(" ", strip=True).lstrip(":").strip() if content else ""
+        pushes.append({
+            "tag": tag_key,
+            "user": user.get_text(strip=True) if user else "",
+            "content": content_text,
+            "datetime": datetime_text.get_text(" ", strip=True) if datetime_text else "",
+        })
+
+    for element in main_content.select(".article-metaline, .article-metaline-right, .push, script, style"):
+        element.decompose()
+
+    lines = []
+    for raw_line in main_content.get_text("\n").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("※ 發信站:") or line.startswith("※ 文章網址:"):
+            break
+        if line == "--":
+            break
+        if line.startswith("※") or line.startswith("◆"):
+            continue
+        lines.append(line)
+
+    title = metadata.get("標題") or ""
+    if not title:
+        og_title = soup.select_one("meta[property='og:title']")
+        title = og_title.get("content", "").strip() if og_title else ""
+
+    return {
+        "board": board,
+        "article_id": article_id,
+        "author": metadata.get("作者", ""),
+        "title": title,
+        "date": metadata.get("時間", ""),
+        "body": "\n".join(lines).strip(),
+        "push_counts": push_counts,
+        "pushes": pushes,
+        "url": url,
+    }
+
+
+def format_ptt_article(article: dict) -> str:
+    """Format parsed PTT data as stable plain text for summarization."""
+    if not article:
+        return ""
+
+    lines = [
+        f"看板：{article.get('board', '')}",
+        f"文章 ID：{article.get('article_id', '')}",
+        f"標題：{article.get('title', '')}",
+        f"作者：{article.get('author', '')}",
+        f"時間：{article.get('date', '')}",
+        f"來源：{article.get('url', '')}",
+        "",
+        "## 本文",
+        article.get("body") or "（未抓到本文內容）",
+        "",
+        "## 推文統計",
+    ]
+    push_counts = article.get("push_counts") or {}
+    lines.extend([
+        f"- 推：{push_counts.get('推', 0)}",
+        f"- 噓：{push_counts.get('噓', 0)}",
+        f"- →：{push_counts.get('→', 0)}",
+    ])
+
+    pushes = article.get("pushes") or []
+    if pushes:
+        lines.extend(["", "## 推文節錄"])
+        for push in pushes[:30]:
+            user = push.get("user") or "unknown"
+            content = push.get("content") or ""
+            datetime_text = push.get("datetime") or ""
+            suffix = f" ({datetime_text})" if datetime_text else ""
+            lines.append(f"- {push.get('tag', '→')} {user}: {content}{suffix}")
+        if len(pushes) > 30:
+            lines.append(f"- 另有 {len(pushes) - 30} 則推文未列出")
+
+    return "\n".join(lines).strip()
+
+
 def fetch_ptt_content(url: str) -> tuple[str, str]:
     """Fetch PTT article content with over18 cookie."""
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, cookies={"over18": "1"}, timeout=10)
         response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        title = soup.select_one("meta[property='og:title']")
-        main_content = soup.select_one("#main-content")
-        if not main_content:
+        article = parse_ptt_article_html(response.text, url)
+        content = format_ptt_article(article)
+        if not content:
             return fetch_webpage_content(url), "jina"
-        for element in main_content.select(".article-metaline, .article-metaline-right, .push, script, style"):
-            element.decompose()
-        content = main_content.get_text(separator="\n", strip=True)
-        if title and title.get("content"):
-            content = f"標題：{title.get('content')}\n\n{content}"
         return content[:5000], "ptt-html"
     except Exception as e:
         print(f"[DEBUG] PTT fetch failed: {str(e)}")
