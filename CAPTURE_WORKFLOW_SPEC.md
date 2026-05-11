@@ -29,7 +29,7 @@ type: URL摘要 | 文字筆記 | 語音筆記 | 圖片分析 | 翻譯 | 社群�
 category: 科技 | AI | 金融 | 商業 | 新聞 | 教學 | 地圖 | 投資 | 生活 | 其他
 source_type: text | audio | image | webpage | threads | facebook | youtube | google_maps | 104 | ptt
 capture_status: full | partial | failed
-extractor: line-text | line-audio | line-image | jina | direct-html | apify | google-maps-apify | youtube-transcript | youtube-oembed | ptt-html | 104-ajax | fallback
+extractor: line-text | line-audio | line-image | jina | direct-html | apify | facebook-apify | threads-apify | google-maps-apify | youtube-transcript | youtube-oembed | ptt-html | 104-ajax | fallback
 needs_review: true | false
 tags: [tag1, tag2]
 source: "https://example.com"
@@ -47,6 +47,18 @@ or regulations should be lightly normalized only.
 - If extraction is incomplete but useful, save `capture_status: partial`.
 - LINE replies should stay short; the full extraction, raw input, and status live
   in Obsidian.
+
+## Social Capture Rules
+
+- Facebook and Threads URLs should use their platform-specific Apify extractors
+  before generic webpage fallback.
+- Normalize and preserve account name, post text, reactions, comments, shares,
+  images, image OCR text, post URL, published time, and content type when
+  available.
+- Treat media-only posts as `capture_status: partial` with `needs_review: true`
+  unless there is enough OCR or post text to summarize safely.
+- Keep support for Facebook mobile, group, share, photo, reel, watch, and
+  `fb.watch` links, plus both `threads.net` and `threads.com` post/profile URLs.
 
 ## YouTube Capture Rules
 

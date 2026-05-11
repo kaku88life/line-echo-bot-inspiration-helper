@@ -90,6 +90,24 @@ class TestDetectSocialPlatform:
         assert platform == "facebook"
         assert url_type == "post"
 
+    def test_facebook_fb_watch_url(self):
+        url = "https://fb.watch/abc123/"
+        platform, url_type = main.detect_social_platform(url)
+        assert platform == "facebook"
+        assert url_type == "post"
+
+    def test_facebook_group_post_url(self):
+        url = "https://www.facebook.com/groups/test.group/posts/123456"
+        platform, url_type = main.detect_social_platform(url)
+        assert platform == "facebook"
+        assert url_type == "post"
+
+    def test_facebook_photo_php_url(self):
+        url = "https://www.facebook.com/photo.php?fbid=123456"
+        platform, url_type = main.detect_social_platform(url)
+        assert platform == "facebook"
+        assert url_type == "post"
+
     def test_facebook_mobile_post(self):
         url = "https://m.facebook.com/user/posts/123456"
         platform, url_type = main.detect_social_platform(url)
@@ -329,6 +347,35 @@ class TestNormalizeSocialPostData:
         assert result["comments"] == 30
         assert result["shares"] == 10
 
+    def test_facebook_nested_author_metrics_and_attachment_fields(self):
+        post = {
+            "author": {"name": "Nested Page"},
+            "message": {"text": "Nested post text"},
+            "reactions": {"count": "1.2K"},
+            "commentsCount": "250",
+            "statistics": {"shares": "3"},
+            "attachments": [
+                {
+                    "image": {"uri": "https://example.com/full.jpg"},
+                    "ocrText": "Poster OCR text",
+                }
+            ],
+            "permalinkUrl": "https://www.facebook.com/page/posts/123",
+            "createdTime": "2026-05-01T10:00:00Z",
+            "__typename": "Photo",
+        }
+        result = main.normalize_social_post_data(post, "facebook")
+        assert result["username"] == "Nested Page"
+        assert result["text"] == "Nested post text"
+        assert result["likes"] == 1200
+        assert result["comments"] == 250
+        assert result["shares"] == 3
+        assert result["images"] == ["https://example.com/full.jpg"]
+        assert result["image_text"] == "Poster OCR text"
+        assert result["post_url"] == "https://www.facebook.com/page/posts/123"
+        assert result["published_at"] == "2026-05-01T10:00:00Z"
+        assert result["content_type"] == "Photo"
+
     def test_facebook_missing_fields(self):
         post = {}
         result = main.normalize_social_post_data(post, "facebook")
@@ -365,6 +412,31 @@ class TestNormalizeSocialPostData:
         assert result["text"] == "Alt caption"
         assert result["likes"] == 300
         assert result["comments"] == 15
+
+    def test_threads_nested_text_string_counts_and_image_dicts(self):
+        post = {
+            "author": {"username": "thread_nested"},
+            "content": {"text": "Nested Threads content"},
+            "likeCount": "1.5K",
+            "replyCount": "12",
+            "repostCount": "2",
+            "images": [{"url": "https://example.com/thread.jpg"}],
+            "imageText": "Thread image OCR",
+            "postUrl": "https://threads.net/@thread_nested/post/abc",
+            "timestamp": "2026-05-02T12:00:00Z",
+            "mediaType": "image",
+        }
+        result = main.normalize_social_post_data(post, "threads")
+        assert result["username"] == "thread_nested"
+        assert result["text"] == "Nested Threads content"
+        assert result["likes"] == 1500
+        assert result["comments"] == 12
+        assert result["shares"] == 2
+        assert result["images"] == ["https://example.com/thread.jpg"]
+        assert result["image_text"] == "Thread image OCR"
+        assert result["post_url"] == "https://threads.net/@thread_nested/post/abc"
+        assert result["published_at"] == "2026-05-02T12:00:00Z"
+        assert result["content_type"] == "image"
 
     def test_unknown_platform(self):
         post = {"text": "unknown"}
@@ -488,12 +560,18 @@ class TestCaptureQuality:
             "likes": 1,
             "comments": 2,
             "shares": 3,
+            "post_url": "https://threads.net/@tester/post/abc",
+            "published_at": "2026-05-01",
+            "content_type": "text",
         }
-        result = main.format_social_extracted_content(post, "https://threads.net/@tester/post/abc")
+        result = main.format_social_extracted_content(post, "https://threads.net/@tester")
         assert "tester" in result
         assert "貼文原文" in result
         assert "圖片文字" in result
         assert "https://example.com/a.jpg" in result
+        assert "貼文網址：https://threads.net/@tester/post/abc" in result
+        assert "發布時間：2026-05-01" in result
+        assert "內容類型：text" in result
 
     def test_assess_youtube_metadata_only_is_partial(self):
         content = "標題：Test\n頻道：Channel\n\n字幕：尚未抓取逐字稿，先保存影片 metadata。"

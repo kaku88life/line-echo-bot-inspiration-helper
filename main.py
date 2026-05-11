@@ -148,17 +148,21 @@ URL_PATTERN = re.compile(
 # Social media URL patterns
 # Single post patterns
 FACEBOOK_POST_PATTERN = re.compile(
-    r'https?://(?:www\.|m\.|web\.)?facebook\.com/(?:[\w.]+/)?(?:posts|videos|photos|watch|story\.php|permalink\.php|reel|share)[\w/?=&.-]*'
+    r'https?://(?:(?:www\.|m\.|web\.)?facebook\.com/(?:groups/[\w.-]+/(?:posts|permalink)/?[\w/?=&%#_.:-]*|(?:[\w.]+/)?(?:posts|videos|photos|photo\.php|watch|story\.php|permalink\.php|reel|share)[\w/?=&%#_.:-]*)|fb\.watch/[\w-]+/?(?:[?#].*)?)',
+    re.IGNORECASE,
 )
 # Facebook page/profile patterns (for multi-post scraping)
 FACEBOOK_PAGE_PATTERN = re.compile(
-    r'https?://(?:www\.|m\.|web\.)?facebook\.com/([\w.]+)/?(?:\?.*)?$'
+    r'https?://(?:www\.|m\.|web\.)?facebook\.com/([\w.]+)/?(?:\?.*)?$',
+    re.IGNORECASE,
 )
 THREADS_POST_PATTERN = re.compile(
-    r'https?://(?:www\.)?threads\.(?:net|com)/@[\w.]+/post/[\w-]+(?:[/?#].*)?$'
+    r'https?://(?:www\.)?threads\.(?:net|com)/@[\w.]+/post/[\w-]+(?:[/?#].*)?$',
+    re.IGNORECASE,
 )
 THREADS_PROFILE_PATTERN = re.compile(
-    r'https?://(?:www\.)?threads\.(?:net|com)/@[\w.]+/?(?:\?.*)?$'
+    r'https?://(?:www\.)?threads\.(?:net|com)/@[\w.]+/?(?:\?.*)?$',
+    re.IGNORECASE,
 )
 
 # Command pattern for multi-post scraping: "爬 5 篇 [URL]" or "幫我爬 10 篇 [URL]"
@@ -456,6 +460,129 @@ def platform_display_name(platform: str) -> str:
     return platform.title() if platform else "Social"
 
 
+def clean_social_value(value) -> str:
+    """Normalize scraped social values into compact human-readable text."""
+    if value is None or value is False:
+        return ""
+    if isinstance(value, bool):
+        return "是" if value else ""
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return re.sub(r'\s+', ' ', value).strip()
+    if isinstance(value, (list, tuple, set)):
+        parts = [clean_social_value(item) for item in value]
+        return "\n".join(part for part in parts if part).strip()
+    if isinstance(value, dict):
+        for key in ["text", "content", "message", "description", "body", "caption", "title", "name", "username", "value"]:
+            cleaned = clean_social_value(value.get(key))
+            if cleaned:
+                return cleaned
+    return ""
+
+
+def pick_social_value(data: dict, *keys):
+    for key in keys:
+        value = data.get(key)
+        if value is not None and value != "":
+            return value
+    return ""
+
+
+def coerce_social_count(value) -> int:
+    if value is None or value is False:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, dict):
+        for key in ["count", "total", "totalCount", "value", "text"]:
+            count = coerce_social_count(value.get(key))
+            if count:
+                return count
+        return 0
+    if isinstance(value, list):
+        return len(value)
+
+    text = clean_social_value(value).replace(",", "")
+    if not text:
+        return 0
+    match = re.search(r'(\d+(?:\.\d+)?)\s*([kKmMbB萬千]?)', text)
+    if not match:
+        return 0
+    number = float(match.group(1))
+    suffix = match.group(2).lower()
+    multiplier = {
+        "k": 1000,
+        "m": 1_000_000,
+        "b": 1_000_000_000,
+        "萬": 10_000,
+        "千": 1000,
+    }.get(suffix, 1)
+    return int(number * multiplier)
+
+
+def collect_social_images(post_data: dict) -> list[str]:
+    images = []
+
+    def add_image(value):
+        if not value:
+            return
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned.startswith("http") and cleaned not in images:
+                images.append(cleaned)
+            return
+        if isinstance(value, list):
+            for item in value:
+                add_image(item)
+            return
+        if isinstance(value, dict):
+            nested_keys = ["photo_image", "image", "images", "media", "thumbnailImage"]
+            has_nested_image = any(value.get(key) for key in nested_keys)
+            for key in nested_keys:
+                add_image(value.get(key))
+            if has_nested_image:
+                return
+            for key in ["uri", "url", "src", "thumbnail", "displayUrl", "display_url", "imageUrl", "image_url", "fullUrl", "full_url"]:
+                add_image(value.get(key))
+
+    for key in ["images", "image", "imageUrl", "imageUrls", "displayUrl", "displayUrls", "thumbnail"]:
+        add_image(post_data.get(key))
+    for key in ["media", "attachments", "mediaAttachments", "attachmentsData"]:
+        add_image(post_data.get(key))
+
+    return images
+
+
+def collect_social_image_text(post_data: dict) -> str:
+    parts = []
+
+    def add_text(value):
+        cleaned = clean_social_value(value)
+        if cleaned:
+            parts.append(cleaned)
+
+    for key in ["image_text", "imageText", "ocrText", "ocr", "alt", "accessibilityCaption"]:
+        add_text(post_data.get(key))
+    for media_key in ["media", "attachments", "mediaAttachments", "attachmentsData"]:
+        media_value = post_data.get(media_key) or []
+        if isinstance(media_value, dict):
+            media_value = [media_value]
+        if isinstance(media_value, list):
+            for item in media_value:
+                if isinstance(item, dict):
+                    for key in ["ocrText", "imageText", "alt", "accessibilityCaption", "description"]:
+                        add_text(item.get(key))
+
+    deduped = []
+    for part in parts:
+        if part not in deduped:
+            deduped.append(part)
+    return "\n".join(deduped).strip()
+
+
 def assess_social_post_content(post_data: dict) -> dict:
     """Classify normalized social post quality before AI summarization."""
     text = "\n".join(
@@ -504,14 +631,21 @@ def assess_social_post_content(post_data: dict) -> dict:
 
 def format_social_extracted_content(post_data: dict, source_url: str = "") -> str:
     """Format normalized social post fields as raw capture content."""
+    post_url = post_data.get("post_url") or ""
+    published_at = post_data.get("published_at") or ""
+    content_type = post_data.get("content_type") or ""
     lines = [
         f"帳號：{post_data.get('username') or '未知'}",
-        f"來源：{source_url}",
+        f"來源：{source_url or post_url}",
         f"互動數據：{post_data.get('likes', 0)} 讚 | {post_data.get('comments', 0)} 留言 | {post_data.get('shares', 0)} 分享",
-        "",
-        "貼文文字：",
-        post_data.get("text") or "（未抓取到文字）",
     ]
+    if post_url and post_url != source_url:
+        lines.append(f"貼文網址：{post_url}")
+    if published_at:
+        lines.append(f"發布時間：{published_at}")
+    if content_type:
+        lines.append(f"內容類型：{content_type}")
+    lines.extend(["", "貼文文字：", post_data.get("text") or "（未抓取到文字）"])
     image_text = post_data.get("image_text") or ""
     if image_text:
         lines.extend(["", "圖片文字：", image_text])
@@ -943,102 +1077,127 @@ def setup_notion_social_database():
 def normalize_social_post_data(post_data: dict, platform: str) -> dict:
     """Normalize post data from different platforms to a common format"""
     print(f"[DEBUG] Raw post data: {post_data}")
+    post_data = post_data or {}
+    platform = (platform or "").lower()
 
     if platform == "facebook":
-        # Try various field names from Apify Facebook scraper
         user_dict = post_data.get("user") if isinstance(post_data.get("user"), dict) else {}
+        author_dict = post_data.get("author") if isinstance(post_data.get("author"), dict) else {}
         username = (
-            post_data.get("pageName") or
-            post_data.get("userName") or
-            user_dict.get("name") or
-            post_data.get("name") or
+            clean_social_value(pick_social_value(post_data, "pageName", "userName", "accountName", "profileName")) or
+            clean_social_value(user_dict.get("name") or user_dict.get("username")) or
+            clean_social_value(author_dict.get("name") or author_dict.get("username")) or
+            clean_social_value(post_data.get("name")) or
             "未知"
         )
         text = (
-            post_data.get("text") or
-            post_data.get("postText") or
-            post_data.get("message") or
-            post_data.get("description") or
-            ""
+            clean_social_value(pick_social_value(
+                post_data,
+                "text",
+                "postText",
+                "message",
+                "description",
+                "content",
+                "caption",
+                "body",
+            ))
         )
-        # Handle various reaction/like field names
         reactions_dict = post_data.get("reactions") if isinstance(post_data.get("reactions"), dict) else {}
+        statistics_dict = post_data.get("statistics") if isinstance(post_data.get("statistics"), dict) else {}
         likes = (
             post_data.get("likes") or
             post_data.get("likesCount") or
             post_data.get("reactionsCount") or
+            post_data.get("reactionCount") or
+            statistics_dict.get("likes") or
+            statistics_dict.get("reactions") or
             reactions_dict.get("count") or
+            reactions_dict.get("total") or
             0
         )
         comments = (
             post_data.get("comments") or
             post_data.get("commentsCount") or
             post_data.get("commentCount") or
+            statistics_dict.get("comments") or
             0
         )
         shares = (
             post_data.get("shares") or
             post_data.get("sharesCount") or
             post_data.get("shareCount") or
+            statistics_dict.get("shares") or
             0
         )
-        # Extract images from media array
-        images = []
-        image_text = ""
-        media_list = post_data.get("media") or []
-        for media_item in media_list:
-            if isinstance(media_item, dict):
-                # Try photo_image.uri first, then thumbnail
-                photo_image = media_item.get("photo_image", {})
-                img_url = photo_image.get("uri") if isinstance(photo_image, dict) else None
-                if not img_url:
-                    img_url = media_item.get("thumbnail") or media_item.get("url")
-                if img_url:
-                    images.append(img_url)
-                # Collect OCR text
-                ocr = media_item.get("ocrText") or ""
-                if ocr:
-                    image_text += ocr + "\n"
         return {
             "username": username,
             "text": text,
-            "likes": int(likes) if likes else 0,
-            "comments": int(comments) if comments else 0,
-            "shares": int(shares) if shares else 0,
-            "images": images,
-            "image_text": image_text.strip(),
+            "likes": coerce_social_count(likes),
+            "comments": coerce_social_count(comments),
+            "shares": coerce_social_count(shares),
+            "images": collect_social_images(post_data),
+            "image_text": collect_social_image_text(post_data),
+            "post_url": clean_social_value(pick_social_value(
+                post_data,
+                "url",
+                "postUrl",
+                "facebookUrl",
+                "permalinkUrl",
+                "link",
+            )),
+            "published_at": clean_social_value(pick_social_value(
+                post_data,
+                "time",
+                "timestamp",
+                "date",
+                "createdTime",
+                "creationTime",
+            )),
+            "content_type": clean_social_value(pick_social_value(post_data, "type", "__typename", "postType")),
         }
     elif platform == "threads":
-        # Support both old (ownerUsername/text) and new (authorId/content) field names
+        author_dict = post_data.get("author") if isinstance(post_data.get("author"), dict) else {}
+        user_dict = post_data.get("user") if isinstance(post_data.get("user"), dict) else {}
         author_id = post_data.get("authorId", "")
-        # authorId often comes as "/@username", strip leading /@
         if isinstance(author_id, str):
-            author_id = author_id.lstrip("/@")
+            author_id = re.sub(r'^/?@', '', author_id.strip())
         username = (
-            post_data.get("ownerUsername") or
-            post_data.get("author", {}).get("username") or
-            post_data.get("authorName") or
+            clean_social_value(pick_social_value(post_data, "ownerUsername", "username")) or
+            clean_social_value(author_dict.get("username") or author_dict.get("name")) or
+            clean_social_value(user_dict.get("username") or user_dict.get("name")) or
+            clean_social_value(post_data.get("authorName")) or
             author_id or
             "未知"
         )
         text = (
-            post_data.get("text") or
-            post_data.get("caption") or
-            post_data.get("content") or
-            ""
+            clean_social_value(pick_social_value(
+                post_data,
+                "text",
+                "caption",
+                "content",
+                "postText",
+                "description",
+                "body",
+            ))
         )
-        # Extract images
-        images = post_data.get("images") or []
-        # Ensure images is a list of strings
-        images = [img for img in images if isinstance(img, str)]
+        metrics = post_data.get("metrics") if isinstance(post_data.get("metrics"), dict) else {}
         return {
             "username": username,
             "text": text,
-            "likes": int(post_data.get("likeCount") or post_data.get("likesCount") or 0),
-            "comments": int(post_data.get("replyCount") or post_data.get("commentsCount") or 0),
-            "shares": int(post_data.get("repostCount") or 0),
-            "images": images,
-            "image_text": "",
+            "likes": coerce_social_count(
+                post_data.get("likeCount") or post_data.get("likesCount") or post_data.get("likes") or metrics.get("likes")
+            ),
+            "comments": coerce_social_count(
+                post_data.get("replyCount") or post_data.get("commentsCount") or post_data.get("comments") or metrics.get("replies")
+            ),
+            "shares": coerce_social_count(
+                post_data.get("repostCount") or post_data.get("shareCount") or post_data.get("shares") or metrics.get("reposts")
+            ),
+            "images": collect_social_images(post_data),
+            "image_text": collect_social_image_text(post_data),
+            "post_url": clean_social_value(pick_social_value(post_data, "postUrl", "url", "threadUrl", "permalink")),
+            "published_at": clean_social_value(pick_social_value(post_data, "timestamp", "time", "takenAt", "date", "createdAt")),
+            "content_type": clean_social_value(pick_social_value(post_data, "type", "mediaType", "__typename")),
         }
     return {
         "username": "未知",
@@ -1048,6 +1207,9 @@ def normalize_social_post_data(post_data: dict, platform: str) -> dict:
         "shares": 0,
         "images": [],
         "image_text": "",
+        "post_url": "",
+        "published_at": "",
+        "content_type": "",
     }
 
 
