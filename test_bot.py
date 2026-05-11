@@ -50,6 +50,15 @@ class TestExtractUrl:
         assert result is not None
         assert "example.com" in result
 
+    def test_extract_threads_url_with_at_and_hyphen(self):
+        text = "看看 https://www.threads.com/@j_h0n.k/post/DXrOA9-kl57?xmt=AQF0_lbg&slof=1"
+        result = main.extract_url(text)
+        assert result == "https://www.threads.com/@j_h0n.k/post/DXrOA9-kl57?xmt=AQF0_lbg&slof=1"
+
+    def test_extract_url_strips_trailing_punctuation(self):
+        text = "來源：https://example.com/page?x=1。"
+        assert main.extract_url(text) == "https://example.com/page?x=1"
+
 
 class TestDetectSocialPlatform:
     """測試社群平台偵測"""
@@ -108,6 +117,12 @@ class TestDetectSocialPlatform:
     def test_threads_com_post_url(self):
         """threads.com 域名的貼文"""
         url = "https://www.threads.com/@chiongyjdpp/post/DU2oUjaEynj?xmt=AQF0rvrP"
+        platform, url_type = main.detect_social_platform(url)
+        assert platform == "threads"
+        assert url_type == "post"
+
+    def test_threads_post_url_with_hyphen_id(self):
+        url = "https://www.threads.com/@j_h0n.k/post/DXrOA9-kl57?xmt=AQF0_lbg"
         platform, url_type = main.detect_social_platform(url)
         assert platform == "threads"
         assert url_type == "post"
@@ -411,6 +426,42 @@ class TestParseSummaryResponse:
         assert result["category"] == "地圖"
         assert result["title"] == "一蘭拉麵 新宿店"
         assert "拉麵" in result["keywords"]
+
+
+class TestCaptureQuality:
+    """測試捕捉狀態與來源分類"""
+
+    def test_assess_failed_content_marker(self):
+        result = main.assess_extracted_content("無法抓取網頁內容：Connection reset")
+        assert result["status"] == main.CAPTURE_STATUS_FAILED
+        assert result["needs_review"] is True
+
+    def test_assess_partial_short_content(self):
+        result = main.assess_extracted_content("只有一點點內容")
+        assert result["status"] == main.CAPTURE_STATUS_PARTIAL
+        assert result["needs_review"] is True
+
+    def test_assess_full_content(self):
+        content = "這是一段有足夠長度的內容。" * 20
+        result = main.assess_extracted_content(content)
+        assert result["status"] == main.CAPTURE_STATUS_FULL
+        assert result["needs_review"] is False
+
+    def test_source_type_from_url(self):
+        assert main.source_type_from_url("https://www.youtube.com/watch?v=abc") == "youtube"
+        assert main.source_type_from_url("https://maps.app.goo.gl/abc") == "google_maps"
+        assert main.source_type_from_url("https://www.104.com.tw/job/6m2k2") == "104"
+        assert main.source_type_from_url("https://www.ptt.cc/bbs/Stock/M.123.html") == "ptt"
+
+    def test_format_weekly_review_counts_status(self):
+        notes = [
+            {"name": "2026-05-01-a.md", "capture_status": "full", "source_type": "webpage", "needs_review": "false"},
+            {"name": "2026-05-01-b.md", "capture_status": "failed", "source_type": "104", "needs_review": "true"},
+        ]
+        result = main.format_weekly_review(notes)
+        assert "新增筆記：2 筆" in result
+        assert "failed: 1" in result
+        assert "需要確認：1 筆" in result
 
 
 class TestParseSocialSummaryResponse:

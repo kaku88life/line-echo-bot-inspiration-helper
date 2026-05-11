@@ -137,9 +137,10 @@ def check_translation_timeout():
 timeout_thread = threading.Thread(target=check_translation_timeout, daemon=True)
 timeout_thread.start()
 
-# URL pattern for detecting links
+# URL pattern for detecting links. Keep this permissive because mobile share
+# links often contain @, !, encoded params, and platform-specific tokens.
 URL_PATTERN = re.compile(
-    r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[/\w\.-]*(?:\?[^\s]*)?'
+    r'https?://[^\s<>"\'\u3000]+'
 )
 
 # Social media URL patterns
@@ -152,7 +153,7 @@ FACEBOOK_PAGE_PATTERN = re.compile(
     r'https?://(?:www\.|m\.|web\.)?facebook\.com/([\w.]+)/?(?:\?.*)?$'
 )
 THREADS_POST_PATTERN = re.compile(
-    r'https?://(?:www\.)?threads\.(?:net|com)/@[\w.]+/post/[\w]+(?:\?.*)?'
+    r'https?://(?:www\.)?threads\.(?:net|com)/@[\w.]+/post/[\w-]+(?:[/?#].*)?$'
 )
 THREADS_PROFILE_PATTERN = re.compile(
     r'https?://(?:www\.)?threads\.(?:net|com)/@[\w.]+/?(?:\?.*)?$'
@@ -249,6 +250,136 @@ LANGUAGE_MAP = {
     "希臘語": "Greek",
 }
 
+CAPTURE_STATUS_FULL = "full"
+CAPTURE_STATUS_PARTIAL = "partial"
+CAPTURE_STATUS_FAILED = "failed"
+
+FAILED_CONTENT_MARKERS = [
+    "無法抓取網頁內容",
+    "請提供網頁內容",
+    "請提供網頁內容的具體信息",
+    "please provide the webpage content",
+    "access denied",
+    "forbidden",
+    "just a moment",
+    "enable javascript",
+    "connection reset",
+    "連接被重置",
+    "error 403",
+    "error 404",
+    "error 500",
+]
+
+
+def yaml_block_value(value: str) -> str:
+    """Format a possibly multiline string as a YAML block scalar."""
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not text:
+        return "''"
+    lines = text.split("\n")
+    return "|-\n" + "\n".join(f"  {line}" if line else "  " for line in lines)
+
+
+def yaml_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def normalize_input_light(text: str) -> str:
+    """Lightly normalize user input without changing domain meaning."""
+    normalized = re.sub(r'[ \t]+', ' ', text or "").strip()
+    normalized = re.sub(r'\n{3,}', '\n\n', normalized)
+    return normalized
+
+
+def assess_extracted_content(content: str) -> dict:
+    """Classify extracted content quality before asking AI to summarize it."""
+    text = (content or "").strip()
+    lower = text.lower()
+    if not text:
+        return {
+            "status": CAPTURE_STATUS_FAILED,
+            "needs_review": True,
+            "reason": "empty_content",
+        }
+    if any(marker in lower for marker in FAILED_CONTENT_MARKERS):
+        return {
+            "status": CAPTURE_STATUS_FAILED,
+            "needs_review": True,
+            "reason": "fetch_error_marker",
+        }
+    compact = re.sub(r'\s+', '', text)
+    if len(compact) < 80:
+        return {
+            "status": CAPTURE_STATUS_PARTIAL,
+            "needs_review": True,
+            "reason": "short_content",
+        }
+    if len(compact) < 180:
+        return {
+            "status": CAPTURE_STATUS_PARTIAL,
+            "needs_review": True,
+            "reason": "limited_content",
+        }
+    return {
+        "status": CAPTURE_STATUS_FULL,
+        "needs_review": False,
+        "reason": "",
+    }
+
+
+def build_capture_status_note(
+    url: str,
+    raw_input: str,
+    source_type: str,
+    extractor: str,
+    status: str,
+    reason: str,
+    extracted_content: str = "",
+) -> str:
+    """Build a safe note body when extraction is partial or failed."""
+    lines = [
+        "## 捕捉狀態",
+        f"- source_type: {source_type}",
+        f"- capture_status: {status}",
+        f"- extractor: {extractor}",
+        f"- reason: {reason or 'unknown'}",
+        "",
+        "## 原始輸入",
+        raw_input or url,
+        "",
+        "## 來源",
+        url,
+    ]
+    if extracted_content:
+        lines.extend(["", "## 抓取到的內容", extracted_content])
+    if status == CAPTURE_STATUS_FAILED:
+        lines.extend([
+            "",
+            "## 待補充",
+            "這筆資料沒有抓到足夠內容，請補一句保存理由或手動貼上重點。",
+        ])
+    return "\n".join(lines)
+
+
+def source_type_from_url(url: str) -> str:
+    lower = (url or "").lower()
+    if "threads.net" in lower or "threads.com" in lower:
+        return "threads"
+    if "facebook.com" in lower or "fb.watch" in lower:
+        return "facebook"
+    if "youtube.com" in lower or "youtu.be" in lower:
+        return "youtube"
+    if any(pattern in lower for pattern in [
+        "maps.google.com", "google.com/maps", "goo.gl/maps",
+        "maps.app.goo.gl", "/maps/", "maps.app"
+    ]):
+        return "google_maps"
+    if "104.com.tw/job/" in lower:
+        return "104"
+    if "ptt.cc" in lower:
+        return "ptt"
+    return "webpage"
+
 
 def resolve_short_url(url: str) -> str:
     """Resolve a shortened URL to its final destination URL.
@@ -267,7 +398,9 @@ def resolve_short_url(url: str) -> str:
 def extract_url(text: str) -> str | None:
     """Extract the first URL from text"""
     match = URL_PATTERN.search(text)
-    return match.group(0) if match else None
+    if not match:
+        return None
+    return match.group(0).rstrip(".,，。;；:：!?！？)]}）】」'")
 
 
 def detect_social_platform(url: str) -> tuple[str | None, str]:
@@ -734,6 +867,104 @@ def fetch_webpage_content(url: str) -> str:
 
     except Exception as e:
         return f"無法抓取網頁內容：{str(e)}"
+
+
+def fetch_youtube_content(url: str) -> tuple[str, str]:
+    """Fetch YouTube metadata via oEmbed. Transcript support can be added later."""
+    try:
+        response = requests.get(
+            "https://www.youtube.com/oembed",
+            params={"url": url, "format": "json"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+        lines = [
+            f"標題：{data.get('title', '')}",
+            f"頻道：{data.get('author_name', '')}",
+            f"頻道網址：{data.get('author_url', '')}",
+            f"影片網址：{url}",
+            "",
+            "字幕：尚未抓取逐字稿，先保存影片 metadata。",
+        ]
+        return "\n".join(line for line in lines if line is not None), "youtube-oembed"
+    except Exception as e:
+        print(f"[DEBUG] YouTube metadata fetch failed: {str(e)}")
+        return fetch_webpage_content(url), "jina"
+
+
+def fetch_ptt_content(url: str) -> tuple[str, str]:
+    """Fetch PTT article content with over18 cookie."""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(url, headers=headers, cookies={"over18": "1"}, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        title = soup.select_one("meta[property='og:title']")
+        main_content = soup.select_one("#main-content")
+        if not main_content:
+            return fetch_webpage_content(url), "jina"
+        for element in main_content.select(".article-metaline, .article-metaline-right, .push, script, style"):
+            element.decompose()
+        content = main_content.get_text(separator="\n", strip=True)
+        if title and title.get("content"):
+            content = f"標題：{title.get('content')}\n\n{content}"
+        return content[:5000], "ptt-html"
+    except Exception as e:
+        print(f"[DEBUG] PTT fetch failed: {str(e)}")
+        return fetch_webpage_content(url), "jina"
+
+
+def fetch_104_content(url: str) -> tuple[str, str]:
+    """Fetch 104 job detail from its public ajax endpoint when possible."""
+    match = re.search(r'104\.com\.tw/job/([0-9a-zA-Z]+)', url)
+    if not match:
+        return fetch_webpage_content(url), "jina"
+    job_id = match.group(1)
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': f'https://www.104.com.tw/job/{job_id}',
+        }
+        response = requests.get(f"https://www.104.com.tw/job/ajax/content/{job_id}", headers=headers, timeout=10)
+        response.raise_for_status()
+        payload = response.json()
+        data = payload.get("data", payload)
+        job_name = data.get("header", {}).get("jobName") or data.get("jobName") or ""
+        cust_name = data.get("header", {}).get("custName") or data.get("custName") or ""
+        job_detail = data.get("jobDetail", {}) if isinstance(data.get("jobDetail"), dict) else {}
+        condition = data.get("condition", {}) if isinstance(data.get("condition"), dict) else {}
+        welfare = data.get("welfare", {}) if isinstance(data.get("welfare"), dict) else {}
+        lines = [
+            f"職缺：{job_name}",
+            f"公司：{cust_name}",
+            f"地點：{job_detail.get('addressRegion', '')} {job_detail.get('addressDetail', '')}",
+            f"薪資：{job_detail.get('salary', '')}",
+            "",
+            "工作內容：",
+            job_detail.get("jobDescription", ""),
+            "",
+            "條件要求：",
+            condition.get("other", ""),
+            "",
+            "福利：",
+            welfare.get("welfare", "") if isinstance(welfare, dict) else "",
+        ]
+        return "\n".join(line for line in lines if line is not None), "104-ajax"
+    except Exception as e:
+        print(f"[DEBUG] 104 fetch failed: {str(e)}")
+        return fetch_webpage_content(url), "jina"
+
+
+def fetch_content_by_source_type(url: str, source_type: str) -> tuple[str, str]:
+    """Fetch URL content with source-specific extractors where available."""
+    if source_type == "youtube":
+        return fetch_youtube_content(url)
+    if source_type == "ptt":
+        return fetch_ptt_content(url)
+    if source_type == "104":
+        return fetch_104_content(url)
+    return fetch_webpage_content(url), "jina"
 
 
 def summarize_webpage(content: str) -> str:
@@ -1255,7 +1486,13 @@ def save_to_gdrive(
     original_text: str = None,
     keywords: list = None,
     target_language: str = None,
-    user_id: str = None
+    user_id: str = None,
+    source_type: str = None,
+    capture_status: str = CAPTURE_STATUS_FULL,
+    extractor: str = None,
+    needs_review: bool = False,
+    raw_input: str = None,
+    normalized_input: str = None,
 ) -> bool:
     """Save content as .md file to ObsidianVault in Google Drive"""
     if not GDRIVE_VAULT_FOLDER_ID:
@@ -1275,14 +1512,29 @@ def save_to_gdrive(
         if keywords:
             tags.extend(keywords[:5])
 
-        frontmatter = f"---\ndate: {date_str}\ntype: {content_type}\ncategory: {category}\ntags: [{', '.join(tags)}]\n"
+        frontmatter = f"---\ndate: {date_str}\ntype: {content_type}\ncategory: {category}\n"
+        if source_type:
+            frontmatter += f"source_type: {source_type}\n"
+        frontmatter += f"capture_status: {capture_status}\n"
+        if extractor:
+            frontmatter += f"extractor: {extractor}\n"
+        frontmatter += f"needs_review: {yaml_bool(needs_review)}\n"
+        frontmatter += f"tags: [{', '.join(tags)}]\n"
         if source_url:
             frontmatter += f"source: \"{source_url}\"\n"
         if target_language:
             frontmatter += f"language: {target_language}\n"
+        if raw_input:
+            frontmatter += f"raw_input: {yaml_block_value(raw_input)}\n"
+        if normalized_input:
+            frontmatter += f"normalized_input: {yaml_block_value(normalized_input)}\n"
         frontmatter += "---\n\n"
 
         body = f"# {title}\n\n{content}\n"
+        if raw_input:
+            body += f"\n## 原始輸入\n{raw_input}\n"
+        if normalized_input and normalized_input != raw_input:
+            body += f"\n## 修正版輸入\n{normalized_input}\n"
         if original_text:
             body += f"\n## 原始文字\n{original_text}\n"
 
@@ -1346,6 +1598,12 @@ def get_today_files() -> list:
         return []
 
 
+def get_latest_today_file() -> dict | None:
+    """Return the latest source note from today, if available."""
+    files = get_today_files()
+    return files[0] if files else None
+
+
 def read_gdrive_file(file_id: str) -> str:
     """Read content of a Google Drive file by ID"""
     try:
@@ -1384,6 +1642,130 @@ def list_sources_files_by_month(month_str: str = None, limit: int = 100) -> list
     except Exception as e:
         print(f"[DEBUG] List sources error: {str(e)}")
         return []
+
+
+def list_recent_source_notes(days: int = 7, limit: int = 120) -> list[dict]:
+    """Read recent Source notes and return lightweight metadata."""
+    start_date = datetime.now() - timedelta(days=days - 1)
+    month_keys = {datetime.now().strftime("%Y-%m"), start_date.strftime("%Y-%m")}
+    candidates = []
+    for month_key in sorted(month_keys, reverse=True):
+        candidates.extend(list_sources_files_by_month(month_key, limit=limit))
+
+    notes = []
+    seen_ids = set()
+    for file_info in candidates:
+        if file_info.get("id") in seen_ids:
+            continue
+        seen_ids.add(file_info.get("id"))
+        name = file_info.get("name", "")
+        date_match = re.match(r'(\d{4}-\d{2}-\d{2})', name)
+        if not date_match:
+            continue
+        try:
+            note_date = datetime.strptime(date_match.group(1), "%Y-%m-%d")
+        except ValueError:
+            continue
+        if note_date < start_date.replace(hour=0, minute=0, second=0, microsecond=0):
+            continue
+        content = read_gdrive_file(file_info["id"])
+        notes.append({
+            "id": file_info["id"],
+            "name": name,
+            "date": date_match.group(1),
+            "category": extract_frontmatter_category(content),
+            "source_type": extract_frontmatter_field(content, "source_type", "unknown"),
+            "capture_status": extract_frontmatter_field(content, "capture_status", "unknown"),
+            "needs_review": extract_frontmatter_field(content, "needs_review", "false"),
+            "content": content,
+        })
+        if len(notes) >= limit:
+            break
+    return notes
+
+
+def summarize_capture_notes(notes: list[dict]) -> dict:
+    """Aggregate capture metadata for weekly review commands."""
+    summary = {
+        "total": len(notes),
+        "by_status": {},
+        "by_type": {},
+        "needs_review": [],
+    }
+    for note in notes:
+        status = note.get("capture_status") or "unknown"
+        source_type = note.get("source_type") or "unknown"
+        summary["by_status"][status] = summary["by_status"].get(status, 0) + 1
+        summary["by_type"][source_type] = summary["by_type"].get(source_type, 0) + 1
+        if str(note.get("needs_review", "")).lower() == "true" or status in [CAPTURE_STATUS_FAILED, CAPTURE_STATUS_PARTIAL]:
+            summary["needs_review"].append(note)
+    return summary
+
+
+def format_weekly_review(notes: list[dict], title: str = "本週回顧") -> str:
+    summary = summarize_capture_notes(notes)
+    lines = [f"{title}（近 7 天）", ""]
+    lines.append(f"新增筆記：{summary['total']} 筆")
+    if summary["by_status"]:
+        status_text = " / ".join(f"{k}: {v}" for k, v in sorted(summary["by_status"].items()))
+        lines.append(f"抓取狀態：{status_text}")
+    if summary["by_type"]:
+        type_text = " / ".join(f"{k}: {v}" for k, v in sorted(summary["by_type"].items()))
+        lines.append(f"來源類型：{type_text}")
+    if notes:
+        lines.append("")
+        lines.append("最近筆記：")
+        for note in notes[:8]:
+            short_name = note["name"].replace(".md", "")
+            lines.append(f"- {short_name} [{note.get('capture_status', 'unknown')}]")
+    if summary["needs_review"]:
+        lines.append("")
+        lines.append(f"需要確認：{len(summary['needs_review'])} 筆")
+        for note in summary["needs_review"][:5]:
+            lines.append(f"- {note['name'].replace('.md', '')}")
+    return "\n".join(lines)
+
+
+def save_weekly_digest(notes: list[dict]) -> str | None:
+    """Save a weekly digest under 40_Outputs/weekly-digests in Google Drive."""
+    if not GDRIVE_VAULT_FOLDER_ID:
+        return None
+    try:
+        service = get_gdrive_service()
+        outputs_id = get_or_create_folder(service, "40_Outputs", GDRIVE_VAULT_FOLDER_ID)
+        digests_id = get_or_create_folder(service, "weekly-digests", outputs_id)
+        week_key = datetime.now().strftime("%G-W%V")
+        filename = f"{week_key}.md"
+        content = "# Weekly Digest\n\n" + format_weekly_review(notes, title="本週知識消化")
+        content += "\n\n## 建議下一步\n"
+        content += "- 檢查 failed 與 partial 筆記，補上保存理由或原文。\n"
+        content += "- 將穩定主題整理進 Wiki。\n"
+        media = MediaInMemoryUpload(content.encode("utf-8"), mimetype="text/plain")
+        existing = service.files().list(
+            q=f"name='{filename}' and '{digests_id}' in parents and trashed=false",
+            fields='files(id)'
+        ).execute().get('files', [])
+        if existing:
+            result = service.files().update(fileId=existing[0]['id'], media_body=media, fields='id').execute()
+        else:
+            result = service.files().create(
+                body={'name': filename, 'parents': [digests_id]},
+                media_body=media,
+                fields='id'
+            ).execute()
+        log_id = find_vault_file("log.md")
+        if log_id:
+            log_content = read_gdrive_file(log_id) or ""
+            log_entry = f"\n\n## {datetime.now().strftime('%Y-%m-%d')} — 週度消化\n\n"
+            log_entry += f"- 近 7 天 Sources：{len(notes)} 筆\n"
+            log_entry += f"- 週報：[[40_Outputs/weekly-digests/{week_key}]]\n"
+            insert_pos = log_content.find('\n\n---')
+            new_log = log_content[:insert_pos] + log_entry + log_content[insert_pos:] if insert_pos >= 0 else log_content + log_entry
+            update_gdrive_file_content(log_id, new_log)
+        return result.get('id')
+    except Exception as e:
+        print(f"[DEBUG] Save weekly digest error: {str(e)}")
+        return None
 
 
 def search_sources(keyword: str, limit: int = 8) -> list[dict]:
@@ -1481,6 +1863,14 @@ def extract_frontmatter_category(content: str) -> str:
     """Extract category from markdown frontmatter"""
     match = re.search(r'^category:\s*(.+)$', content, re.MULTILINE)
     return match.group(1).strip() if match else "其他"
+
+
+def extract_frontmatter_field(content: str, field: str, default: str = "") -> str:
+    """Extract a one-line frontmatter field."""
+    match = re.search(rf'^{re.escape(field)}:\s*(.+)$', content or "", re.MULTILINE)
+    if not match:
+        return default
+    return match.group(1).strip().strip('"')
 
 
 def consolidate_sources_to_wiki(topic: str, sources_texts: list[str]) -> str:
@@ -1721,7 +2111,12 @@ def save_social_to_gdrive(
     post_type: str = "其他",
     user_id: str = None,
     images: list = None,
-    image_text: str = None
+    image_text: str = None,
+    source_type: str = None,
+    capture_status: str = CAPTURE_STATUS_FULL,
+    extractor: str = "apify",
+    needs_review: bool = False,
+    raw_input: str = None,
 ) -> bool:
     """Save social media post as .md file to Google Drive"""
     content = f"{summary}\n\n**互動數據：** {likes} 讚 | {comments} 留言 | {shares} 分享"
@@ -1738,7 +2133,12 @@ def save_social_to_gdrive(
         source_url=source_url,
         original_text=original_text,
         keywords=keywords,
-        user_id=user_id
+        user_id=user_id,
+        source_type=source_type or platform.lower(),
+        capture_status=capture_status,
+        extractor=extractor,
+        needs_review=needs_review,
+        raw_input=raw_input or source_url,
     )
 
 
@@ -1910,10 +2310,69 @@ def handle_text_message(event):
             )
             return
 
+        # 本週回顧 / 消化狀態指令
+        if text in ["本週回顧", "這週回顧", "消化狀態"]:
+            notes = list_recent_source_notes(days=7)
+            title = "消化狀態" if text == "消化狀態" else "本週回顧"
+            reply_text = format_weekly_review(notes, title=title)
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(
+                    text=reply_text,
+                    quick_reply=QuickReply(items=[
+                        QuickReplyItem(action=MessageAction(label="整理本週", text="整理本週")),
+                        QuickReplyItem(action=MessageAction(label="今日回顧", text="今日回顧")),
+                        QuickReplyItem(action=MessageAction(label="搜尋筆記", text="查 ")),
+                    ])
+                )])
+            )
+            return
+
+        # 整理本週：產生 weekly digest，不直接改 Wiki
+        if text in ["整理本週", "週整理", "本週整理"]:
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="開始整理近 7 天捕捉內容，完成後會推送週報摘要。")]
+                )
+            )
+
+            def _weekly_digest_async(uid):
+                try:
+                    notes = list_recent_source_notes(days=7)
+                    digest_id = save_weekly_digest(notes)
+                    result_text = format_weekly_review(notes, title="本週知識消化")
+                    if digest_id:
+                        result_text += "\n\n已寫入 Obsidian weekly-digests。"
+                    else:
+                        result_text += "\n\n週報寫入失敗，請稍後再試。"
+                    with ApiClient(configuration) as push_client:
+                        MessagingApi(push_client).push_message(PushMessageRequest(
+                            to=uid,
+                            messages=[TextMessage(text=result_text)]
+                        ))
+                except Exception as ex:
+                    print(f"[DEBUG] Weekly digest async error: {str(ex)}")
+                    try:
+                        with ApiClient(configuration) as push_client:
+                            MessagingApi(push_client).push_message(PushMessageRequest(
+                                to=uid,
+                                messages=[TextMessage(text="整理本週失敗，請稍後再試。")]
+                            ))
+                    except Exception:
+                        pass
+
+            threading.Thread(target=_weekly_digest_async, args=(user_id,), daemon=True).start()
+            return
+
         # 補充想法指令
         if text.startswith("補充想法：") or text.startswith("補充想法:"):
             extra = text.split("：", 1)[-1].split(":", 1)[-1].strip()
             last = user_last_file.get(user_id)
+            if not last:
+                latest = get_latest_today_file()
+                if latest:
+                    last = {"file_id": latest["id"], "title": latest["name"].replace(".md", ""), "saved_at": time.time()}
+                    user_last_file[user_id] = last
             if last and extra:
                 success = append_to_gdrive_file(last["file_id"], extra)
                 if success:
@@ -2345,7 +2804,12 @@ def handle_text_message(event):
                     content=translated,
                     original_text=text,
                     target_language=target_language,
-                    user_id=user_id
+                    user_id=user_id,
+                    source_type="text",
+                    capture_status=CAPTURE_STATUS_FULL,
+                    extractor="line-translation",
+                    raw_input=text,
+                    normalized_input=normalize_input_light(text),
                 )
             except Exception as e:
                 print(f"[DEBUG] Translation error: {str(e)}")
@@ -2474,7 +2938,12 @@ def handle_text_message(event):
                     content=translated,
                     original_text=text_to_translate,
                     target_language=target_language,
-                    user_id=user_id
+                    user_id=user_id,
+                    source_type="text",
+                    capture_status=CAPTURE_STATUS_FULL,
+                    extractor="line-translation",
+                    raw_input=text_to_translate,
+                    normalized_input=normalize_input_light(text_to_translate),
                 )
             except Exception as e:
                 print(f"[DEBUG] Translation error: {str(e)}")
@@ -2686,6 +3155,7 @@ def handle_text_message(event):
 
         if url:
             try:
+                source_type = source_type_from_url(url)
                 # Priority 1: Check if it's a social media URL (Facebook or Threads)
                 platform, url_type = detect_social_platform(url)
                 if platform:
@@ -2693,10 +3163,33 @@ def handle_text_message(event):
 
                     # Check if Apify is configured
                     if not apify_client:
+                        note = build_capture_status_note(
+                            url=url,
+                            raw_input=text,
+                            source_type=platform,
+                            extractor="apify",
+                            status=CAPTURE_STATUS_FAILED,
+                            reason="apify_not_configured",
+                        )
+                        save_to_gdrive(
+                            title=f"{platform} 貼文抓取失敗",
+                            content_type="URL摘要",
+                            category="其他",
+                            content=note,
+                            source_url=url,
+                            keywords=[platform, "抓取失敗"],
+                            user_id=user_id,
+                            source_type=platform,
+                            capture_status=CAPTURE_STATUS_FAILED,
+                            extractor="apify",
+                            needs_review=True,
+                            raw_input=text,
+                            normalized_input=normalize_input_light(text),
+                        )
                         line_bot_api.reply_message_with_http_info(
                             ReplyMessageRequest(
                                 reply_token=event.reply_token,
-                                messages=[TextMessage(text="❌ 社群爬蟲功能未設定，請設定 APIFY_API_KEY")],
+                                messages=[TextMessage(text="社群抓取尚未設定，已先把網址存成待確認筆記。")],
                             )
                         )
                         return
@@ -2733,10 +3226,35 @@ def handle_text_message(event):
                     posts = scrape_facebook_post(url, 1) if platform == "facebook" else scrape_threads_post(url, 1)
 
                     if not posts:
+                        note = build_capture_status_note(
+                            url=url,
+                            raw_input=text,
+                            source_type=platform,
+                            extractor="apify",
+                            status=CAPTURE_STATUS_FAILED,
+                            reason="no_posts_returned",
+                        )
+                        fid = save_to_gdrive(
+                            title=f"{platform} 貼文抓取失敗",
+                            content_type="URL摘要",
+                            category="其他",
+                            content=note,
+                            source_url=url,
+                            keywords=[platform, "抓取失敗"],
+                            user_id=user_id,
+                            source_type=platform,
+                            capture_status=CAPTURE_STATUS_FAILED,
+                            extractor="apify",
+                            needs_review=True,
+                            raw_input=text,
+                            normalized_input=normalize_input_light(text),
+                        )
+                        if fid:
+                            user_last_file[user_id] = {"file_id": fid, "title": f"{platform} 貼文抓取失敗", "saved_at": time.time()}
                         line_bot_api.reply_message_with_http_info(
                             ReplyMessageRequest(
                                 reply_token=event.reply_token,
-                                messages=[TextMessage(text=f"❌ 無法爬取 {platform.title()} 貼文，可能是私人貼文或網址無效")],
+                                messages=[TextMessage(text=f"無法爬取 {platform.title()} 貼文，已先存成待確認筆記。")],
                             )
                         )
                         return
@@ -2755,7 +3273,7 @@ def handle_text_message(event):
                     platform_emoji = "📘" if platform == "facebook" else "🧵"
                     platform_name = "Facebook" if platform == "facebook" else "Threads"
 
-                    response_text = f"{platform_emoji} {platform_name} 貼文分析\n{url}\n\n{summary}"
+                    response_text = f"{platform_emoji} {platform_name} 貼文已保存\n抓取狀態：full\n\n{parsed.get('summary') or summary[:300]}"
 
                     line_bot_api.reply_message_with_http_info(
                         ReplyMessageRequest(
@@ -2766,7 +3284,7 @@ def handle_text_message(event):
                     print(f"[DEBUG] Social post analysis sent successfully")
 
                     # Save to Notion
-                    save_social_to_gdrive(
+                    fid = save_social_to_gdrive(
                         platform=platform_name,
                         username=normalized_data.get("username", "未知"),
                         summary=parsed.get("summary", ""),
@@ -2779,15 +3297,19 @@ def handle_text_message(event):
                         post_type=parsed.get("post_type", "其他"),
                         user_id=user_id,
                         images=normalized_data.get("images", []),
-                        image_text=normalized_data.get("image_text", "")
+                        image_text=normalized_data.get("image_text", ""),
+                        source_type=platform,
+                        capture_status=CAPTURE_STATUS_FULL,
+                        extractor="apify",
+                        needs_review=False,
+                        raw_input=text,
                     )
+                    if fid:
+                        user_last_file[user_id] = {"file_id": fid, "title": f"{platform_name}-{normalized_data.get('username', '未知')}", "saved_at": time.time()}
                     return
 
                 # Priority 2+3: Google Maps or general webpage
-                is_google_maps = any(pattern in url.lower() for pattern in [
-                    'maps.google.com', 'google.com/maps', 'goo.gl/maps',
-                    'maps.app.goo.gl', '/maps/', 'maps.app'
-                ])
+                is_google_maps = source_type == "google_maps"
 
                 # Send immediate waiting message (Jina AI + GPT can take 10-20s)
                 line_bot_api.reply_message_with_http_info(
@@ -2806,15 +3328,43 @@ def handle_text_message(event):
                             if place_data:
                                 scraped_info = format_google_maps_result(place_data)
                                 page_summary = summarize_google_maps(scraped_info, resolved_url)
+                                extractor = "google-maps-apify"
+                                quality = {"status": CAPTURE_STATUS_FULL, "needs_review": False, "reason": ""}
                             else:
                                 print(f"[DEBUG] Apify scraper failed, falling back to webpage fetch...")
                                 page_content = fetch_webpage_content(resolved_url)
-                                page_summary = summarize_google_maps(page_content, resolved_url)
+                                extractor = "jina"
+                                quality = assess_extracted_content(page_content)
+                                if quality["status"] == CAPTURE_STATUS_FAILED:
+                                    page_summary = build_capture_status_note(
+                                        url=resolved_url,
+                                        raw_input=text,
+                                        source_type="google_maps",
+                                        extractor=extractor,
+                                        status=quality["status"],
+                                        reason=quality["reason"],
+                                        extracted_content=page_content,
+                                    )
+                                else:
+                                    page_summary = summarize_google_maps(page_content, resolved_url)
                         else:
                             print(f"[DEBUG] Fetching webpage content...")
-                            page_content = fetch_webpage_content(u)
+                            source_type_inner = source_type_from_url(u)
+                            page_content, extractor = fetch_content_by_source_type(u, source_type_inner)
                             print(f"[DEBUG] Content length: {len(page_content)}")
-                            page_summary = summarize_webpage(page_content)
+                            quality = assess_extracted_content(page_content)
+                            if quality["status"] == CAPTURE_STATUS_FAILED:
+                                page_summary = build_capture_status_note(
+                                    url=u,
+                                    raw_input=text,
+                                    source_type=source_type_inner,
+                                    extractor=extractor,
+                                    status=quality["status"],
+                                    reason=quality["reason"],
+                                    extracted_content=page_content,
+                                )
+                            else:
+                                page_summary = summarize_webpage(page_content)
 
                         print(f"[DEBUG] Summary: {page_summary[:100]}...")
                         parsed_url = parse_summary_response(page_summary)
@@ -2826,7 +3376,13 @@ def handle_text_message(event):
                             content=page_summary,
                             source_url=u,
                             keywords=parsed_url["keywords"],
-                            user_id=uid
+                            user_id=uid,
+                            source_type=source_type_from_url(u),
+                            capture_status=quality["status"],
+                            extractor=extractor,
+                            needs_review=quality["needs_review"],
+                            raw_input=text,
+                            normalized_input=normalize_input_light(text),
                         )
                         if fid:
                             user_last_file[uid] = {"file_id": fid, "title": title, "saved_at": time.time()}
@@ -2836,7 +3392,7 @@ def handle_text_message(event):
                             push_api.push_message(PushMessageRequest(
                                 to=uid,
                                 messages=[TextMessage(
-                                    text=f"🔗 網頁摘要\n{u}\n\n{page_summary}",
+                                    text=f"網址已保存\n抓取狀態：{quality['status']}\n來源類型：{source_type_from_url(u)}\n\n{(parsed_url['title'] or '完整內容已存入 Obsidian')}",
                                     quick_reply=QuickReply(items=[
                                         QuickReplyItem(action=MessageAction(label="💭 補充想法", text="補充想法：")),
                                         QuickReplyItem(action=MessageAction(label="📚 今日回顧", text="今日回顧")),
@@ -2892,7 +3448,13 @@ def handle_text_message(event):
                     category=parsed["category"],
                     content=f"{summary}\n\n## 原始輸入\n{text}",
                     keywords=parsed["keywords"],
-                    user_id=user_id
+                    user_id=user_id,
+                    source_type="text",
+                    capture_status=CAPTURE_STATUS_FULL,
+                    extractor="line-text",
+                    needs_review=False,
+                    raw_input=text,
+                    normalized_input=normalize_input_light(text),
                 )
                 if file_id:
                     user_last_file[user_id] = {"file_id": file_id, "title": title, "saved_at": time.time()}
@@ -3077,7 +3639,10 @@ def handle_image_message(event):
                     category="翻譯",
                     content=result,
                     target_language=target_language,
-                    user_id=user_id
+                    user_id=user_id,
+                    source_type="image",
+                    capture_status=CAPTURE_STATUS_FULL,
+                    extractor="line-image-vision",
                 )
                 return
 
@@ -3107,7 +3672,11 @@ def handle_image_message(event):
                 category=parsed["category"],
                 content=result,
                 keywords=parsed["keywords"],
-                user_id=user_id
+                user_id=user_id,
+                source_type="image",
+                capture_status=CAPTURE_STATUS_FULL,
+                extractor="line-image-vision",
+                needs_review=False,
             )
             if fid:
                 user_last_file[user_id] = {"file_id": fid, "title": title, "saved_at": time.time()}
@@ -3205,7 +3774,13 @@ def handle_audio_message(event):
                 category=parsed["category"],
                 content=f"{summary}\n\n## 原始語音\n{result_text}",
                 keywords=parsed["keywords"],
-                user_id=user_id
+                user_id=user_id,
+                source_type="audio",
+                capture_status=CAPTURE_STATUS_FULL,
+                extractor="line-audio-whisper",
+                needs_review=False,
+                raw_input=result_text,
+                normalized_input=normalize_input_light(result_text),
             )
             if fid:
                 user_last_file[user_id] = {"file_id": fid, "title": title, "saved_at": time.time()}
