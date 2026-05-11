@@ -1,0 +1,83 @@
+{
+  "schemaVersion": "0.1.0",
+  "name": "Line Inspiration Web Clip",
+  "behavior": "create",
+  "noteNameFormat": "{{date|date:\"YYYY-MM-DD\"}} {{title|safe_name}}",
+  "path": "Sources/web-clips",
+  "context": "{{content}}",
+  "properties": [
+    {
+      "name": "date",
+      "value": "{{date|date:\"YYYY-MM-DD\"}}",
+      "type": "text"
+    },
+    {
+      "name": "type",
+      "value": "網頁剪藏",
+      "type": "text"
+    },
+    {
+      "name": "category",
+      "value": "其他",
+      "type": "text"
+    },
+    {
+      "name": "source_type",
+      "value": "webpage",
+      "type": "text"
+    },
+    {
+      "name": "capture_status",
+      "value": "full",
+      "type": "text"
+    },
+    {
+      "name": "extractor",
+      "value": "web-clipper",
+      "type": "text"
+    },
+    {
+      "name": "needs_review",
+      "value": "true",
+      "type": "text"
+    },
+    {
+      "name": "source",
+      "value": "{{url}}",
+      "type": "text"
+    },
+    {
+      "name": "site",
+      "value": "{{site}}",
+      "type": "text"
+    },
+    {
+      "name": "domain",
+      "value": "{{domain}}",
+      "type": "text"
+    },
+    {
+      "name": "author",
+      "value": "{{author}}",
+      "type": "text"
+    },
+    {
+      "name": "published",
+      "value": "{{published|date:\"YYYY-MM-DD\"}}",
+      "type": "text"
+    },
+    {
+      "name": "tags",
+      "value": "web-clip, inbox",
+      "type": "text"
+    }
+  ],
+  "triggers": [
+    "https://",
+    "http://",
+    "schema:@Article",
+    "schema:@NewsArticle",
+    "schema:@BlogPosting"
+  ],
+  "noteContentFormat": "# {{title}}\n\n> [!source]\n> - Source: {{url}}\n> - Site: {{site}}\n> - Domain: {{domain}}\n> - Author: {{author}}\n> - Published: {{published|date:\"YYYY-MM-DD\"}}\n> - Clipped: {{date|date:\"YYYY-MM-DD\"}}\n\n## 待整理\n\n- [ ] 判斷是否值得消化成 Wiki 筆記\n- [ ] 補上自己的重點、問題或下一步\n- [ ] 如內容不完整，改用 LINE Bot URL 擷取或人工檢查\n\n## 我的筆記\n\n\n## 原文內容\n\n{{content}}\n\n## 原始資訊\n\n- Title: {{title}}\n- Description: {{description}}\n- URL: {{url}}\n"
+}

@@ -43,6 +43,22 @@ or regulations should be lightly normalized only.
 - LINE replies should stay short; the full extraction, raw input, and status live
   in Obsidian.
 
+## Web Clipper Rules
+
+- Obsidian Web Clipper is the manual browser-capture path for pages the user is
+  actively reading.
+- Default folder: `Sources/web-clips`.
+- Default template: `web_clipper_templates/line-inspiration-web-clip.json`.
+- Selection template: `web_clipper_templates/line-inspiration-selection-clip.json`.
+- Web Clipper notes should use `source_type: webpage`,
+  `capture_status: full`, `extractor: web-clipper`, and
+  `needs_review: true`.
+- Selected text or term-definition clips should go to `Sources/web-clips/terms`
+  with `capture_status: partial` and `extractor: web-clipper-selection`.
+- Do not auto-generate a summary in the clipper template. Save the page content
+  plus a review checklist; later digestion can happen through weekly review or
+  a separate AI workflow.
+
 ## Desktop Voice Rules
 
 - Desktop voice is Windows desktop-first. Mobile Termux/native microphone support

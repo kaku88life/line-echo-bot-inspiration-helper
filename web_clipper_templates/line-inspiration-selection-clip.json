@@ -1,0 +1,67 @@
+{
+  "schemaVersion": "0.1.0",
+  "name": "Line Inspiration Selection Clip",
+  "behavior": "create",
+  "noteNameFormat": "{{date|date:\"YYYY-MM-DD\"}} 選取段落 {{title|safe_name}}",
+  "path": "Sources/web-clips/terms",
+  "context": "{{selection}}",
+  "properties": [
+    {
+      "name": "date",
+      "value": "{{date|date:\"YYYY-MM-DD\"}}",
+      "type": "text"
+    },
+    {
+      "name": "type",
+      "value": "名詞解釋",
+      "type": "text"
+    },
+    {
+      "name": "category",
+      "value": "其他",
+      "type": "text"
+    },
+    {
+      "name": "source_type",
+      "value": "webpage",
+      "type": "text"
+    },
+    {
+      "name": "capture_status",
+      "value": "partial",
+      "type": "text"
+    },
+    {
+      "name": "extractor",
+      "value": "web-clipper-selection",
+      "type": "text"
+    },
+    {
+      "name": "needs_review",
+      "value": "true",
+      "type": "text"
+    },
+    {
+      "name": "source",
+      "value": "{{url}}",
+      "type": "text"
+    },
+    {
+      "name": "site",
+      "value": "{{site}}",
+      "type": "text"
+    },
+    {
+      "name": "domain",
+      "value": "{{domain}}",
+      "type": "text"
+    },
+    {
+      "name": "tags",
+      "value": "web-clip, term, inbox",
+      "type": "text"
+    }
+  ],
+  "triggers": [],
+  "noteContentFormat": "# 選取段落：{{title}}\n\n> [!source]\n> - Source: {{url}}\n> - Site: {{site}}\n> - Domain: {{domain}}\n> - Clipped: {{date|date:\"YYYY-MM-DD\"}}\n\n## 待整理\n\n- [ ] 補上這段內容在我目前脈絡中的意思\n- [ ] 判斷要不要整理成 Wiki 名詞頁\n- [ ] 如果選取範圍太短或不完整，回原網頁重抓\n\n## 我的理解\n\n\n## 選取內容\n\n{{selection}}\n\n## 原始資訊\n\n- Title: {{title}}\n- Description: {{description}}\n- URL: {{url}}\n"
+}
