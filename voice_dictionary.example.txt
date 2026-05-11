@@ -1,0 +1,37 @@
+# Desktop Voice Capture 自訂字典範例
+#
+# 複製這個檔案為 voice_dictionary.txt 後再編輯。
+# voice_dictionary.txt 不會進 git，適合放個人人名、客戶、專案、品牌、技術詞。
+#
+# 建議格式：一行一個詞，必要時加簡短說明。
+# 如果常被誤聽，可以用「錯字 => 正字」或「錯字 -> 正字」。
+# 如果需要依語境判斷，可以用「詞：說明」。
+
+Kaku
+Obsidian
+Line Inspiration Helper
+Google Drive
+OpenAI
+Whisper
+Drizzle ORM
+
+# 容易誤聽或同音近音
+移傳 => 移轉
+移轉：資料、帳號、系統、檔案、流程或服務從 A 搬到 B 的語境，優先使用「移轉」，不要寫成「移傳」。
+line bot => LINE Bot
+obsidian vault => ObsidianVault
+
+# 人名或暱稱
+Amy
+
+# 常用專案詞
+Capture Workflow
+desktop voice capture
+桌面語音輸入
+語音思考
+會議記錄
+
+# 翻譯時想保留原文的品牌或產品名
+Threads
+Facebook
+YouTube

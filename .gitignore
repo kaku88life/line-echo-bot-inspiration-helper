@@ -13,6 +13,12 @@ wheels/
 .env
 .env.*
 
+# Local voice dictation preferences
+voice_dictionary.txt
+desktop_voice_config.json
+desktop_voice_history.jsonl
+desktop-captures/
+
 # Google Service Account credentials (NEVER commit these)
 gdrive_credentials*.json
 *credentials*.json

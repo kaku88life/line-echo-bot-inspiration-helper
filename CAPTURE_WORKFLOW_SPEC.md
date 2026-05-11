@@ -45,12 +45,30 @@ or regulations should be lightly normalized only.
 
 ## Desktop Voice Rules
 
-- First desktop version is paste-only.
-- Hotkey: `Ctrl+Alt+Z`.
-- Flow: record audio, transcribe with OpenAI Whisper, lightly normalize, paste
-  into the active text field.
+- Desktop voice is Windows desktop-first. Mobile Termux/native microphone support
+  is cancelled for now; mobile capture should stay on LINE Bot.
+- Mode hotkeys:
+  - `Ctrl+Alt+Z`: quick paste.
+  - `Ctrl+Alt+X`: voice thought saved to `Sources/desktop-voice/`.
+  - `Ctrl+Alt+C`: meeting note saved to `Meetings/`.
+  - `Ctrl+Alt+E`: translate to English and paste.
+  - `Ctrl+Alt+J`: translate to Japanese and paste.
+- After choosing a mode, `Space` starts recording and `Space` stops recording and
+  outputs the result. Re-pressing the current mode hotkey can also start/stop.
+- Flow: record audio, transcribe with OpenAI Whisper, apply the local dictionary,
+  lightly normalize, then paste or save based on mode.
+- The local dictionary is `voice_dictionary.txt`, ignored by git. Keep
+  `voice_dictionary.example.txt` as the shareable template.
+- Successful or skipped desktop recordings should append local history to
+  `desktop-captures/history.jsonl` so a future history UI can inspect, re-output,
+  or re-translate entries.
+- Local settings should be read from `desktop_voice_config.json` when present,
+  with `desktop_voice_config.example.json` as the shareable template.
+- The overlay should prioritize readable status text over visual polish. Improve
+  typography and contrast before building a custom UI.
 - Do not override `Ctrl+Z`.
-- Store-to-Obsidian mode is a later phase.
+- Future desktop work: settings UI, history management UI, and Windows startup or
+  installer support.
 
 ## Weekly Review Rules
 
