@@ -12,6 +12,7 @@ The canonical local vault path is `G:\我的雲端硬碟\ObsidianVault`.
 - `.obsidian/`: Obsidian app settings for the single canonical vault root.
 - `Sources/`: raw captured notes from LINE Bot, desktop tools, images, audio, and URLs.
 - `Wiki/`: AI-maintained durable knowledge pages.
+- `Meetings/`: desktop voice meeting notes and summaries.
 - `Logs/`: project and system operation logs.
 - `40_Outputs/weekly-digests/`: weekly digest reports for human review.
 - `90_System/wiki-schema.md`: shared rules for Codex, Claude Code, and automation tools.
@@ -95,6 +96,11 @@ or regulations should be lightly normalized only.
   manager without interrupting the current recording.
 - If the overlay is hidden, the next voice hotkey should reopen the overlay only;
   recording should require another explicit action after the overlay is visible.
+- For the everyday desktop flow, keep `overlay_idle_seconds` at `0` so the
+  overlay stays visible and the record/save hotkey sequence stays predictable.
+- Keep the default silence gate lenient (`min_rms: 0.001`, `min_peak: 0.008`)
+  and surface skipped-recording reasons in the overlay/history before tightening
+  microphone thresholds.
 - The overlay should prioritize readable status text over visual polish. Improve
   typography and contrast before building a custom UI.
 - Do not override `Ctrl+Z`.

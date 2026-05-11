@@ -14,10 +14,10 @@
   "capture_dir": "desktop-captures",
   "history_file": "desktop-captures/history.jsonl",
   "dictionary_file": "voice_dictionary.txt",
-  "overlay_idle_seconds": 5,
+  "overlay_idle_seconds": 0,
   "overlay_font_scale": 1.15,
-  "min_rms": 0.003,
-  "min_peak": 0.015,
+  "min_rms": 0.001,
+  "min_peak": 0.008,
   "thought_paste": false,
   "no_overlay": false,
   "no_normalize": false

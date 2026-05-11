@@ -52,16 +52,17 @@ DEFAULT_MEETING_HOTKEY = "ctrl+alt+c"
 DEFAULT_TRANSLATE_EN_HOTKEY = "ctrl+alt+e"
 DEFAULT_TRANSLATE_JA_HOTKEY = "ctrl+alt+j"
 DEFAULT_CONFIRM_HOTKEY = "space"
-DEFAULT_MIN_RMS = 0.003
-DEFAULT_MIN_PEAK = 0.015
+DEFAULT_MIN_RMS = 0.001
+DEFAULT_MIN_PEAK = 0.008
 DEFAULT_VAULT_PATH = r"G:\我的雲端硬碟\ObsidianVault"
 DEFAULT_CAPTURE_DIR = "desktop-captures"
-DEFAULT_OVERLAY_IDLE_SECONDS = 5.0
+DEFAULT_OVERLAY_IDLE_SECONDS = 0.0
 DEFAULT_OVERLAY_FONT_SCALE = 1.15
 DEFAULT_DICTIONARY_FILE = "voice_dictionary.txt"
 DEFAULT_CONFIG_FILE = "desktop_voice_config.json"
 DEFAULT_HISTORY_FILE = str(Path(DEFAULT_CAPTURE_DIR) / "history.jsonl")
 MANAGER_SCRIPT = "desktop_voice_manager.py"
+LISTENER_LOCK_FILE = Path(tempfile.gettempdir()) / "line-inspiration-desktop-voice.lock"
 
 MODE_LABELS = {
     "paste": "快速輸入",
@@ -410,6 +411,60 @@ def append_history(args, event: dict) -> None:
         print(f"History write failed: {exc}")
 
 
+def describe_recording_skip(recorder: Recorder) -> tuple[str, str, str]:
+    reason = recorder.last_skip_reason or "no_audio"
+    level = recorder.last_audio_level or {}
+    duration = recorder.last_duration
+    if reason == "too_quiet":
+        title = "沒有偵測到清楚語音"
+        detail = (
+            f"音量低於門檻，已略過。\n"
+            f"RMS={level.get('rms', 0.0):.5f} / Peak={level.get('peak', 0.0):.5f}\n"
+            f"目前門檻 RMS={recorder.min_rms:.5f} / Peak={recorder.min_peak:.5f}"
+        )
+    elif reason == "too_short":
+        title = "錄音太短"
+        detail = f"錄音約 {duration:.1f} 秒，已略過。請按下開始後再說話，說完再按 Space。"
+    elif reason == "no_audio_frames":
+        title = "沒有收到麥克風音訊"
+        detail = "錄音期間沒有收到音訊資料，請檢查 Windows 麥克風輸入裝置。"
+    else:
+        title = "沒有產生可處理音檔"
+        detail = "這次錄音沒有進入轉文字流程，請再試一次。"
+    return reason, title, detail
+
+
+def acquire_listener_lock():
+    """Prevent multiple hotkey listeners from running at the same time."""
+    lock_file = LISTENER_LOCK_FILE.open("a+")
+    lock_file.seek(0)
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            try:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                lock_file.close()
+                return None
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                lock_file.close()
+                return None
+    except Exception:
+        lock_file.close()
+        raise
+    lock_file.seek(0)
+    lock_file.truncate()
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
+    return lock_file
+
+
 def build_voice_note(
     mode: str,
     title: str,
@@ -674,11 +729,17 @@ class Recorder:
     frames: list = field(default_factory=list)
     stream: object | None = None
     started_at: float | None = None
+    last_skip_reason: str | None = None
+    last_audio_level: dict[str, float] = field(default_factory=dict)
+    last_duration: float = 0.0
 
     def start(self, mode_label: str, shortcuts_text: str) -> None:
         if self.stream:
             return
         self.frames = []
+        self.last_skip_reason = None
+        self.last_audio_level = {}
+        self.last_duration = 0.0
         self.started_at = time.time()
         self.stream = sd.InputStream(
             samplerate=self.sample_rate,
@@ -699,15 +760,19 @@ class Recorder:
         self.stream.close()
         self.stream = None
         duration = time.time() - (self.started_at or time.time())
+        self.last_duration = duration
         self.started_at = None
         if duration < 0.4 or not self.frames:
+            self.last_skip_reason = "too_short" if duration < 0.4 else "no_audio_frames"
             beep("error")
             notify("Desktop Voice Capture", "錄音太短，已略過。")
             print("Recording too short; skipped.")
             return None
         audio = np.concatenate(self.frames, axis=0)
         level = get_audio_level(audio)
+        self.last_audio_level = level
         if level["rms"] < self.min_rms and level["peak"] < self.min_peak:
+            self.last_skip_reason = "too_quiet"
             beep("error")
             notify(
                 "Desktop Voice Capture",
@@ -1032,7 +1097,16 @@ def run_hotkey_listener(args) -> None:
             threading.Thread(target=process_in_background, args=(audio_path, mode), daemon=True).start()
         else:
             remove_control_hotkeys()
-            set_overlay("待命", "桌面語音待命中", get_shortcuts_text(args))
+            reason, title, detail = describe_recording_skip(recorder)
+            append_history(args, {
+                "mode": mode,
+                "mode_label": mode_label,
+                "status": "skipped",
+                "reason": reason,
+                "duration_seconds": round(recorder.last_duration, 3),
+                "audio_level": recorder.last_audio_level,
+            })
+            set_overlay("已略過", title, f"{detail}\n\n{get_shortcuts_text(args)}")
 
     def process_in_background(audio_path: str, mode: str) -> None:
         try:
@@ -1203,6 +1277,14 @@ def main() -> None:
     args = parse_args()
     if not args.listen and not args.once:
         args.listen = True
+    listener_lock = None
+    if args.listen:
+        listener_lock = acquire_listener_lock()
+        if not listener_lock:
+            message = "Desktop voice listener is already running; not starting another instance."
+            print(message)
+            notify("Desktop Voice Capture", "語音監聽器已在執行中，未重複啟動。")
+            return
     if args.once:
         run_once(args)
     else:
