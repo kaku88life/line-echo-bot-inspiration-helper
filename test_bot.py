@@ -1345,6 +1345,158 @@ class TestPTTExtractor:
 
 
 # ============================================================
+# 14.4 104 extractor 測試
+# ============================================================
+
+class Test104Extractor:
+    """測試 104 職缺抽取與格式化"""
+
+    SAMPLE_PAYLOAD = {
+        "data": {
+            "header": {
+                "jobName": "Backend Engineer",
+                "custName": "測試科技股份有限公司",
+                "custUrl": "https://www.104.com.tw/company/test",
+                "appearDate": "2026-05-12",
+                "userApplyCount": "11~30人",
+            },
+            "industry": "軟體服務業",
+            "employees": "100人",
+            "jobDetail": {
+                "addressRegion": "台北市信義區",
+                "addressDetail": "信義路五段 7 號",
+                "landmark": "近捷運站",
+                "salary": "月薪 70,000~100,000 元",
+                "jobCategory": [{"description": "後端工程師"}],
+                "jobType": 1,
+                "workType": "日班",
+                "workPeriod": "09:30~18:30",
+                "vacationPolicy": "週休二日",
+                "remoteWork": "部分遠端",
+                "businessTrip": "無需出差",
+                "manageResp": "不需負擔管理責任",
+                "needEmp": "1人",
+                "jobDescription": "負責 API 設計與後端系統開發。<br>需要維護資料庫與雲端服務，並與產品團隊合作。",
+            },
+            "condition": {
+                "workExp": "3年以上",
+                "edu": "大學以上",
+                "major": [{"description": "資訊工程相關"}],
+                "language": [{"description": "英文 -- 聽 /中等、說 /中等"}],
+                "specialty": [{"description": "Python"}],
+                "skill": [{"description": "Django"}],
+                "certificate": [{"description": "AWS 認證"}],
+                "driverLicense": "不拘",
+                "acceptRole": [{"description": "上班族"}],
+                "other": "請附上作品集或 GitHub。",
+            },
+            "welfare": {
+                "welfare": "年終獎金、教育訓練",
+                "tag": ["彈性上下班"],
+                "legalTag": ["勞保", "健保"],
+            },
+            "contact": {
+                "hrName": "王小姐",
+                "email": "hr@example.com",
+            },
+        }
+    }
+
+    def test_extract_104_job_id(self):
+        assert main.extract_104_job_id("https://www.104.com.tw/job/6m2k2?jobsource=checkc") == "6m2k2"
+
+    def test_normalize_104_job_payload(self):
+        result = main.normalize_104_job_payload(
+            self.SAMPLE_PAYLOAD,
+            "https://www.104.com.tw/job/6m2k2",
+        )
+
+        assert result["job_id"] == "6m2k2"
+        assert result["job_name"] == "Backend Engineer"
+        assert result["company_name"] == "測試科技股份有限公司"
+        assert "台北市信義區" in result["address"]
+        assert "負責 API 設計" in result["job_description"]
+        assert "Django" in result["skills"]
+        assert "彈性上下班" in result["welfare"]
+
+    def test_format_104_job(self):
+        job = main.normalize_104_job_payload(
+            self.SAMPLE_PAYLOAD,
+            "https://www.104.com.tw/job/6m2k2",
+        )
+        result = main.format_104_job(job)
+
+        assert "職缺：Backend Engineer" in result
+        assert "公司：測試科技股份有限公司" in result
+        assert "## 工作資訊" in result
+        assert "工作性質：全職" in result
+        assert "月薪 70,000~100,000 元" in result
+        assert "## 工作內容" in result
+        assert "維護資料庫與雲端服務" in result
+        assert "## 條件要求" in result
+        assert "請附上作品集" in result
+        assert "## 福利制度" in result
+
+    @patch("main.requests.get")
+    def test_fetch_104_content_uses_ajax_endpoint(self, mock_get):
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = self.SAMPLE_PAYLOAD
+        mock_get.return_value = response
+
+        content, extractor = main.fetch_104_content("https://www.104.com.tw/job/6m2k2")
+
+        assert extractor == "104-ajax"
+        assert "Backend Engineer" in content
+        assert "測試科技股份有限公司" in content
+        assert "job/ajax/content/6m2k2" in mock_get.call_args.args[0]
+        assert mock_get.call_args.kwargs["headers"]["Referer"] == "https://www.104.com.tw/job/6m2k2"
+
+    def test_assess_104_ajax_full(self):
+        job = main.normalize_104_job_payload(
+            self.SAMPLE_PAYLOAD,
+            "https://www.104.com.tw/job/6m2k2",
+        )
+        content = main.format_104_job(job)
+
+        result = main.assess_url_capture_quality(content, "104", "104-ajax")
+
+        assert result["status"] == main.CAPTURE_STATUS_FULL
+        assert result["needs_review"] is False
+
+    def test_clean_104_text_suppresses_bool_noise(self):
+        assert main.clean_104_text(False) == ""
+        assert main.clean_104_text({"role": [], "disRole": {"needHandicapCompendium": False}}) == ""
+
+    def test_clean_104_text_preserves_angle_note_for_markdown(self):
+        result = main.clean_104_text("第一行<br><抗壓力佳>")
+        assert "第一行" in result
+        assert "（抗壓力佳）" in result
+
+    def test_assess_104_missing_description_partial(self):
+        payload = json.loads(json.dumps(self.SAMPLE_PAYLOAD))
+        payload["data"]["jobDetail"]["jobDescription"] = ""
+        job = main.normalize_104_job_payload(payload, "https://www.104.com.tw/job/6m2k2")
+        content = main.format_104_job(job)
+
+        result = main.assess_url_capture_quality(content, "104", "104-ajax")
+
+        assert result["status"] == main.CAPTURE_STATUS_PARTIAL
+        assert result["needs_review"] is True
+        assert result["reason"] == "104_job_description_missing"
+
+    def test_assess_104_fallback_partial(self):
+        result = main.assess_url_capture_quality("這是一段 fallback 抓到的職缺頁內容。" * 20, "104", "jina")
+
+        assert result["status"] == main.CAPTURE_STATUS_PARTIAL
+        assert result["needs_review"] is True
+        assert result["reason"] == "104_fallback_extractor"
+
+    def test_status_note_only_for_104_partial(self):
+        assert main.should_save_status_note_only("104", main.CAPTURE_STATUS_PARTIAL) is True
+
+
+# ============================================================
 # 14.5 Google Maps 格式化測試
 # ============================================================
 

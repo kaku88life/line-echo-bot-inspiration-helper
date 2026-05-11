@@ -59,6 +59,19 @@ or regulations should be lightly normalized only.
 - If the article body is missing, save a `capture_status: partial` status note
   with `needs_review: true` instead of generating a normal summary.
 
+## 104 Capture Rules
+
+- 104 job URLs should use the `104-ajax` extractor before generic webpage
+  fallback.
+- Extract and preserve job id, title, company, location, salary, job category,
+  work type, schedule, job description, requirements, skills, welfare, company
+  info, contact info, and original URL when available.
+- Convert known numeric codes to human-readable labels only when the mapping is
+  stable; suppress empty boolean/noise fields instead of saving raw API artifacts.
+- If the ajax endpoint fails or the job title, company, or job description is
+  missing, save a `capture_status: partial` status note with `needs_review:
+  true` instead of generating a normal summary.
+
 ## Web Clipper Rules
 
 - Obsidian Web Clipper is the manual browser-capture path for pages the user is

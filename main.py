@@ -356,6 +356,29 @@ def assess_url_capture_quality(content: str, source_type: str, extractor: str) -
                 "needs_review": True,
                 "reason": "ptt_body_missing",
             }
+    if source_type == "104":
+        if extractor != "104-ajax":
+            return {
+                "status": CAPTURE_STATUS_PARTIAL,
+                "needs_review": True,
+                "reason": "104_fallback_extractor",
+            }
+        job_name = re.search(r"^職缺：(.+)$", content or "", re.MULTILINE)
+        company_name = re.search(r"^公司：(.+)$", content or "", re.MULTILINE)
+        desc_match = re.search(r"## 工作內容\s*(.+?)(?:\n\n## 條件要求|\Z)", content or "", re.DOTALL)
+        desc_text = desc_match.group(1).strip() if desc_match else ""
+        if not job_name or not job_name.group(1).strip() or not company_name or not company_name.group(1).strip():
+            return {
+                "status": CAPTURE_STATUS_PARTIAL,
+                "needs_review": True,
+                "reason": "104_title_or_company_missing",
+            }
+        if not desc_text or desc_text == "（未抓到工作內容）":
+            return {
+                "status": CAPTURE_STATUS_PARTIAL,
+                "needs_review": True,
+                "reason": "104_job_description_missing",
+            }
 
     return quality
 
@@ -416,7 +439,7 @@ def source_type_from_url(url: str) -> str:
 
 def should_save_status_note_only(source_type: str, status: str) -> bool:
     return status == CAPTURE_STATUS_FAILED or (
-        source_type in ["youtube", "google_maps", "ptt"] and status == CAPTURE_STATUS_PARTIAL
+        source_type in ["youtube", "google_maps", "ptt", "104"] and status == CAPTURE_STATUS_PARTIAL
     )
 
 
@@ -1379,12 +1402,202 @@ def fetch_ptt_content(url: str) -> tuple[str, str]:
         return fetch_webpage_content(url), "jina"
 
 
+def extract_104_job_id(url: str) -> str:
+    match = re.search(r'104\.com\.tw/job/([0-9a-zA-Z]+)', url or "")
+    return match.group(1) if match else ""
+
+
+def clean_104_text(value) -> str:
+    """Normalize 104 API values while preserving human-readable meaning."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        parts = [clean_104_text(item) for item in value]
+        return "、".join(part for part in parts if part)
+    if isinstance(value, dict):
+        for key in ["description", "desc", "name", "value", "text", "label"]:
+            if value.get(key):
+                return clean_104_text(value.get(key))
+        parts = [clean_104_text(item) for item in value.values()]
+        return "、".join(part for part in parts if part)
+    text = str(value)
+    if "<" in text and ">" in text:
+        text = BeautifulSoup(text, "html.parser").get_text("\n", strip=True)
+    text = re.sub(r'<([^<>\n]{1,120})>', r'（\1）', text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def format_104_job_type(value) -> str:
+    mapping = {
+        "1": "全職",
+        "2": "兼職",
+        "3": "高階",
+        "4": "派遣",
+        "5": "接案",
+        "6": "實習",
+    }
+    text = clean_104_text(value)
+    return mapping.get(text, text)
+
+
+def pick_104_field(data: dict, *paths) -> str:
+    for path in paths:
+        current = data
+        for key in path:
+            if not isinstance(current, dict):
+                current = None
+                break
+            current = current.get(key)
+        value = clean_104_text(current)
+        if value:
+            return value
+    return ""
+
+
+def normalize_104_job_payload(payload: dict, url: str = "") -> dict:
+    """Convert 104 ajax payload variants into a stable job dict."""
+    data = payload.get("data", payload) if isinstance(payload, dict) else {}
+    if not isinstance(data, dict):
+        data = {}
+    header = data.get("header") if isinstance(data.get("header"), dict) else {}
+    job_detail = data.get("jobDetail") if isinstance(data.get("jobDetail"), dict) else {}
+    condition = data.get("condition") if isinstance(data.get("condition"), dict) else {}
+    welfare = data.get("welfare") if isinstance(data.get("welfare"), dict) else {}
+    contact = data.get("contact") if isinstance(data.get("contact"), dict) else {}
+
+    address = " ".join(
+        part for part in [
+            clean_104_text(job_detail.get("addressRegion")),
+            clean_104_text(job_detail.get("addressDetail")),
+            clean_104_text(job_detail.get("landmark")),
+        ]
+        if part
+    )
+    skill_parts = [
+        clean_104_text(condition.get("specialty")),
+        clean_104_text(condition.get("skill")),
+    ]
+    welfare_parts = [
+        clean_104_text(welfare.get("welfare")),
+        clean_104_text(welfare.get("tag")),
+        clean_104_text(welfare.get("legalTag")),
+    ]
+
+    return {
+        "job_id": extract_104_job_id(url),
+        "source_url": url,
+        "job_name": pick_104_field(data, ("header", "jobName"), ("jobName",)),
+        "company_name": pick_104_field(data, ("header", "custName"), ("custName",)),
+        "company_url": clean_104_text(header.get("custUrl")),
+        "industry": clean_104_text(data.get("industry")),
+        "employees": clean_104_text(data.get("employees")),
+        "appear_date": clean_104_text(header.get("appearDate")),
+        "apply_count": clean_104_text(header.get("userApplyCount")),
+        "address": address,
+        "salary": clean_104_text(job_detail.get("salary")),
+        "job_type": format_104_job_type(job_detail.get("jobType")),
+        "work_type": clean_104_text(job_detail.get("workType")),
+        "work_period": clean_104_text(job_detail.get("workPeriod") or job_detail.get("workPeriodTags")),
+        "vacation_policy": clean_104_text(job_detail.get("vacationPolicy")),
+        "start_working_day": clean_104_text(job_detail.get("startWorkingDay")),
+        "remote_work": clean_104_text(job_detail.get("remoteWork")),
+        "business_trip": clean_104_text(job_detail.get("businessTrip")),
+        "manage_resp": clean_104_text(job_detail.get("manageResp")),
+        "need_emp": clean_104_text(job_detail.get("needEmp")),
+        "job_category": clean_104_text(job_detail.get("jobCategory")),
+        "job_description": clean_104_text(job_detail.get("jobDescription")),
+        "work_exp": clean_104_text(condition.get("workExp")),
+        "education": clean_104_text(condition.get("edu")),
+        "major": clean_104_text(condition.get("major")),
+        "language": clean_104_text(condition.get("language") or condition.get("localLanguage")),
+        "skills": "、".join(part for part in skill_parts if part),
+        "certificates": clean_104_text(condition.get("certificate")),
+        "driver_license": clean_104_text(condition.get("driverLicense")),
+        "accept_role": clean_104_text(condition.get("acceptRole")),
+        "condition_other": clean_104_text(condition.get("other")),
+        "welfare": "\n".join(part for part in welfare_parts if part),
+        "contact": "、".join(
+            part for part in [
+                clean_104_text(contact.get("hrName")),
+                clean_104_text(contact.get("phone")),
+                clean_104_text(contact.get("email")),
+                clean_104_text(contact.get("other")),
+            ]
+            if part
+        ),
+    }
+
+
+def append_104_line(lines: list[str], label: str, value: str) -> None:
+    if value:
+        lines.append(f"- {label}：{value}")
+
+
+def format_104_job(job: dict) -> str:
+    """Format normalized 104 job data for safe capture and summarization."""
+    if not job or not any(job.get(key) for key in ["job_name", "company_name", "job_description"]):
+        return ""
+
+    lines = [
+        f"職缺：{job.get('job_name', '')}",
+        f"公司：{job.get('company_name', '')}",
+        f"職缺 ID：{job.get('job_id', '')}",
+        f"來源：{job.get('source_url', '')}",
+    ]
+    if job.get("appear_date"):
+        lines.append(f"刊登日期：{job['appear_date']}")
+    if job.get("apply_count"):
+        lines.append(f"應徵人數：{job['apply_count']}")
+
+    lines.extend(["", "## 工作資訊"])
+    append_104_line(lines, "地點", job.get("address", ""))
+    append_104_line(lines, "薪資", job.get("salary", ""))
+    append_104_line(lines, "職務類別", job.get("job_category", ""))
+    append_104_line(lines, "工作性質", job.get("job_type", ""))
+    append_104_line(lines, "工作型態", job.get("work_type", ""))
+    append_104_line(lines, "上班時段", job.get("work_period", ""))
+    append_104_line(lines, "休假制度", job.get("vacation_policy", ""))
+    append_104_line(lines, "可上班日", job.get("start_working_day", ""))
+    append_104_line(lines, "遠端工作", job.get("remote_work", ""))
+    append_104_line(lines, "出差外派", job.get("business_trip", ""))
+    append_104_line(lines, "管理責任", job.get("manage_resp", ""))
+    append_104_line(lines, "需求人數", job.get("need_emp", ""))
+
+    lines.extend(["", "## 工作內容", job.get("job_description") or "（未抓到工作內容）"])
+
+    lines.extend(["", "## 條件要求"])
+    append_104_line(lines, "工作經歷", job.get("work_exp", ""))
+    append_104_line(lines, "學歷要求", job.get("education", ""))
+    append_104_line(lines, "科系要求", job.get("major", ""))
+    append_104_line(lines, "語文條件", job.get("language", ""))
+    append_104_line(lines, "技能工具", job.get("skills", ""))
+    append_104_line(lines, "證照", job.get("certificates", ""))
+    append_104_line(lines, "駕照", job.get("driver_license", ""))
+    append_104_line(lines, "接受身份", job.get("accept_role", ""))
+    append_104_line(lines, "其他條件", job.get("condition_other", ""))
+
+    if job.get("welfare"):
+        lines.extend(["", "## 福利制度", job["welfare"]])
+
+    lines.extend(["", "## 公司資訊"])
+    append_104_line(lines, "產業", job.get("industry", ""))
+    append_104_line(lines, "員工人數", job.get("employees", ""))
+    append_104_line(lines, "公司頁", job.get("company_url", ""))
+    append_104_line(lines, "聯絡資訊", job.get("contact", ""))
+
+    return "\n".join(lines).strip()
+
+
 def fetch_104_content(url: str) -> tuple[str, str]:
     """Fetch 104 job detail from its public ajax endpoint when possible."""
-    match = re.search(r'104\.com\.tw/job/([0-9a-zA-Z]+)', url)
-    if not match:
+    job_id = extract_104_job_id(url)
+    if not job_id:
         return fetch_webpage_content(url), "jina"
-    job_id = match.group(1)
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -1393,28 +1606,11 @@ def fetch_104_content(url: str) -> tuple[str, str]:
         response = requests.get(f"https://www.104.com.tw/job/ajax/content/{job_id}", headers=headers, timeout=10)
         response.raise_for_status()
         payload = response.json()
-        data = payload.get("data", payload)
-        job_name = data.get("header", {}).get("jobName") or data.get("jobName") or ""
-        cust_name = data.get("header", {}).get("custName") or data.get("custName") or ""
-        job_detail = data.get("jobDetail", {}) if isinstance(data.get("jobDetail"), dict) else {}
-        condition = data.get("condition", {}) if isinstance(data.get("condition"), dict) else {}
-        welfare = data.get("welfare", {}) if isinstance(data.get("welfare"), dict) else {}
-        lines = [
-            f"職缺：{job_name}",
-            f"公司：{cust_name}",
-            f"地點：{job_detail.get('addressRegion', '')} {job_detail.get('addressDetail', '')}",
-            f"薪資：{job_detail.get('salary', '')}",
-            "",
-            "工作內容：",
-            job_detail.get("jobDescription", ""),
-            "",
-            "條件要求：",
-            condition.get("other", ""),
-            "",
-            "福利：",
-            welfare.get("welfare", "") if isinstance(welfare, dict) else "",
-        ]
-        return "\n".join(line for line in lines if line is not None), "104-ajax"
+        job = normalize_104_job_payload(payload, url)
+        content = format_104_job(job)
+        if not content:
+            return fetch_webpage_content(url), "jina"
+        return content[:6000], "104-ajax"
     except Exception as e:
         print(f"[DEBUG] 104 fetch failed: {str(e)}")
         return fetch_webpage_content(url), "jina"
