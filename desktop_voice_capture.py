@@ -16,6 +16,7 @@ import json
 import os
 import queue
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -60,6 +61,7 @@ DEFAULT_OVERLAY_FONT_SCALE = 1.15
 DEFAULT_DICTIONARY_FILE = "voice_dictionary.txt"
 DEFAULT_CONFIG_FILE = "desktop_voice_config.json"
 DEFAULT_HISTORY_FILE = str(Path(DEFAULT_CAPTURE_DIR) / "history.jsonl")
+MANAGER_SCRIPT = "desktop_voice_manager.py"
 
 MODE_LABELS = {
     "paste": "快速輸入",
@@ -167,6 +169,73 @@ def parse_bool(value, default: bool = False) -> bool:
     return default
 
 
+def enable_windows_dpi_awareness() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        result = ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        if result == 0:
+            return
+    except Exception:
+        pass
+    try:
+        import ctypes
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+def apply_tk_scaling(root, scale: float = 1.0) -> None:
+    try:
+        base_scaling = root.winfo_fpixels("1i") / 72.0
+        root.tk.call("tk", "scaling", base_scaling * scale)
+    except Exception:
+        pass
+
+
+def launch_desktop_voice_manager() -> None:
+    base_dir = Path(__file__).resolve().parent
+    manager_path = base_dir / MANAGER_SCRIPT
+    if not manager_path.exists():
+        notify("Desktop Voice Capture", f"找不到設定管理器：{manager_path}")
+        return
+    if focus_window_by_title("Desktop Voice Manager"):
+        notify("Desktop Voice Capture", "已切換到設定管理器。")
+        return
+    candidates = [
+        base_dir / ".venv" / "Scripts" / "pythonw.exe",
+        base_dir / ".venv" / "Scripts" / "python.exe",
+        Path(sys.executable),
+    ]
+    python_path = next((candidate for candidate in candidates if candidate.exists()), Path(sys.executable))
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        subprocess.Popen(
+            [str(python_path), str(manager_path)],
+            cwd=str(base_dir),
+            creationflags=creationflags,
+        )
+        notify("Desktop Voice Capture", "已開啟設定管理器。")
+    except Exception as exc:
+        notify("Desktop Voice Capture", f"設定管理器開啟失敗：{exc}")
+
+
+def focus_window_by_title(title: str) -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        hwnd = ctypes.windll.user32.FindWindowW(None, title)
+        if not hwnd:
+            return False
+        ctypes.windll.user32.ShowWindow(hwnd, 9)
+        ctypes.windll.user32.SetForegroundWindow(hwnd)
+        return True
+    except Exception:
+        return False
+
+
 def load_voice_config(config_file: str | None) -> dict:
     if not config_file:
         return {}
@@ -238,8 +307,11 @@ def get_control_text(args=None) -> str:
         lines.append(f"{format_hotkey_label(confirm_hotkey)} 開始或停止")
     lines.extend(
         [
-            "1 快速  2 思考  3 會議",
-            "4/E 英文  5/J 日文",
+            "1 快速輸入",
+            "2 語音思考",
+            "3 會議記錄",
+            "4 英文翻譯",
+            "5 日文翻譯",
             "Esc 隱藏或取消",
         ]
     )
@@ -475,18 +547,16 @@ class StatusOverlay:
         if not self.enabled:
             return
         self.ui_thread_id = threading.get_ident()
+        enable_windows_dpi_awareness()
         self.root = tk.Tk()
         self.root.title("Desktop Voice Capture")
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.96)
         self.root.configure(bg="#111827")
-        try:
-            self.root.tk.call("tk", "scaling", self.font_scale)
-        except Exception:
-            pass
+        apply_tk_scaling(self.root, self.font_scale)
 
-        frame = tk.Frame(self.root, bg="#111827", padx=18, pady=14)
+        frame = tk.Frame(self.root, bg="#111827", padx=22, pady=18)
         frame.pack(fill="both", expand=True)
 
         self.status_var = tk.StringVar(value="待命")
@@ -496,16 +566,20 @@ class StatusOverlay:
         header = tk.Frame(frame, bg="#111827")
         header.pack(fill="x")
         tk.Label(header, textvariable=self.status_var, bg="#111827", fg="#93c5fd",
-                 font=("Microsoft JhengHei UI", 10, "bold")).pack(side="left", anchor="w")
+                 font=("Microsoft JhengHei UI", 11, "bold")).pack(side="left", anchor="w")
+        tk.Button(header, text="設定", command=launch_desktop_voice_manager, bg="#1f2937", fg="#d1d5db",
+                  activebackground="#374151", activeforeground="#ffffff",
+                  relief="flat", padx=10, pady=3,
+                  font=("Microsoft JhengHei UI", 10)).pack(side="right", padx=(6, 0))
         tk.Button(header, text="隱藏", command=self.hide, bg="#1f2937", fg="#d1d5db",
                   activebackground="#374151", activeforeground="#ffffff",
-                  relief="flat", padx=8, pady=1,
-                  font=("Microsoft JhengHei UI", 9)).pack(side="right")
+                  relief="flat", padx=10, pady=3,
+                  font=("Microsoft JhengHei UI", 10)).pack(side="right")
         tk.Label(frame, textvariable=self.title_var, bg="#111827", fg="#f9fafb",
-                 font=("Microsoft JhengHei UI", 15, "bold")).pack(anchor="w", pady=(6, 3))
+                 font=("Microsoft JhengHei UI", 17, "bold")).pack(anchor="w", pady=(8, 4), fill="x")
         tk.Label(frame, textvariable=self.body_var, bg="#111827", fg="#d1d5db",
-                 justify="left", wraplength=520,
-                 font=("Microsoft JhengHei UI", 11)).pack(anchor="w")
+                 justify="left", wraplength=640,
+                 font=("Microsoft JhengHei UI", 13)).pack(anchor="w", fill="x")
 
         self.root.update_idletasks()
         self._position_window()
@@ -548,12 +622,15 @@ class StatusOverlay:
     def _position_window(self) -> None:
         if not self.root:
             return
-        width = max(self.root.winfo_width(), 440)
-        height = max(self.root.winfo_height(), 148)
+        self.root.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
+        width = max(self.root.winfo_reqwidth(), self.root.winfo_width(), 560)
+        height = max(self.root.winfo_reqheight(), self.root.winfo_height(), 240)
+        width = min(width, screen_w - 48)
+        height = min(height, screen_h - 88)
         x = screen_w - width - 24
-        y = screen_h - height - 64
+        y = max(24, screen_h - height - 64)
         self.root.geometry(f"{width}x{height}+{x}+{y}")
 
     def _drain_queue(self) -> None:
@@ -929,6 +1006,21 @@ def run_hotkey_listener(args) -> None:
         stop_lines.append("Esc 取消錄音")
         set_overlay("錄音中", f"錄音中：{mode_label}", "\n".join(stop_lines))
 
+    def show_overlay_without_action_locked() -> None:
+        if recorder.stream:
+            active_label = get_mode_label(state["active_mode"] or args.mode)
+            stop_lines = ["面板已開啟，錄音仍在進行中"]
+            confirm_hotkey = get_confirm_hotkey(args)
+            if confirm_hotkey:
+                stop_lines.append(f"{format_hotkey_label(confirm_hotkey)} 停止並輸出")
+            stop_lines.append("Esc 取消錄音")
+            set_overlay("錄音中", f"錄音中：{active_label}", "\n".join(stop_lines))
+            return
+        state["active_mode"] = None
+        state["armed"] = False
+        remove_control_hotkeys()
+        set_overlay("待命", "桌面語音待命中", f"面板已開啟\n{get_shortcuts_text(args)}")
+
     def finish_recording_locked(mode: str) -> None:
         mode_label = get_mode_label(mode)
         audio_path = recorder.stop()
@@ -962,6 +1054,9 @@ def run_hotkey_listener(args) -> None:
                 set_overlay("處理中", "請稍候", "上一段錄音仍在轉文字或保存中。")
                 notify("Desktop Voice Capture", "上一段錄音仍在處理中，請稍候。")
                 return
+            if overlay.enabled and overlay.is_hidden:
+                show_overlay_without_action_locked()
+                return
             if recorder.stream:
                 if state["active_mode"] != mode:
                     active_label = get_mode_label(state["active_mode"])
@@ -986,6 +1081,9 @@ def run_hotkey_listener(args) -> None:
             if state["processing"]:
                 beep("error")
                 set_overlay("處理中", "請稍候", "上一段錄音仍在處理中。")
+                return
+            if overlay.enabled and overlay.is_hidden:
+                show_overlay_without_action_locked()
                 return
             mode = state["active_mode"] or args.mode
             if recorder.stream:

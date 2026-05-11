@@ -64,11 +64,22 @@ or regulations should be lightly normalized only.
   or re-translate entries.
 - Local settings should be read from `desktop_voice_config.json` when present,
   with `desktop_voice_config.example.json` as the shareable template.
+- `desktop_voice_manager.py` is the desktop management UI for editing settings,
+  reviewing local history, restarting the listener, and installing or removing
+  per-user Windows startup.
+- Common manager settings should use dropdowns or editable dropdowns instead of
+  requiring users to remember raw values. Path settings should keep browse
+  buttons.
+- `open_desktop_voice_manager.cmd` is the double-click launcher for the manager.
+- The recording overlay should include a settings button that opens the desktop
+  manager without interrupting the current recording.
+- If the overlay is hidden, the next voice hotkey should reopen the overlay only;
+  recording should require another explicit action after the overlay is visible.
 - The overlay should prioritize readable status text over visual polish. Improve
   typography and contrast before building a custom UI.
 - Do not override `Ctrl+Z`.
-- Future desktop work: settings UI, history management UI, and Windows startup or
-  installer support.
+- Future desktop work: make the manager more polished and consider a packaged
+  installer if the Startup-folder launcher is not enough.
 
 ## Weekly Review Rules
 

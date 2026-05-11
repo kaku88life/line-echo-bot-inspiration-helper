@@ -6,6 +6,8 @@
   "translate_en_hotkey": "ctrl+alt+e",
   "translate_ja_hotkey": "ctrl+alt+j",
   "confirm_hotkey": "space",
+  "language": "",
+  "sample_rate": 16000,
   "vault_path": "G:/我的雲端硬碟/ObsidianVault/ObisdianVault",
   "thought_folder": "Sources/desktop-voice",
   "meeting_folder": "Meetings",
