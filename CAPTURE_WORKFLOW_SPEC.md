@@ -5,14 +5,18 @@
 This project is the capture layer for Kaku's Obsidian-centered knowledge workflow.
 LINE Bot, desktop voice capture, and future URL extractors should all write into
 the same ObsidianVault structure instead of creating separate knowledge stores.
+The canonical local vault path is `G:\我的雲端硬碟\ObsidianVault`.
 
 ## Vault Structure
 
+- `.obsidian/`: Obsidian app settings for the single canonical vault root.
 - `Sources/`: raw captured notes from LINE Bot, desktop tools, images, audio, and URLs.
 - `Wiki/`: AI-maintained durable knowledge pages.
 - `Logs/`: project and system operation logs.
 - `40_Outputs/weekly-digests/`: weekly digest reports for human review.
 - `90_System/wiki-schema.md`: shared rules for Codex, Claude Code, and automation tools.
+- `90_System/web-clipper-templates/`: vault-local copies of the Web Clipper
+  templates imported from this repo.
 
 ## Capture Frontmatter
 

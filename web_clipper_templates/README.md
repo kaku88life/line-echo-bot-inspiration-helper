@@ -8,7 +8,7 @@ Use `line-inspiration-web-clip.json` for general webpages.
 
 Settings:
 
-- Vault: `ObisdianVault`
+- Vault: `ObsidianVault`
 - Folder/path: `Sources/web-clips`
 - Behavior: create a new note
 - Capture status: `full`
@@ -47,6 +47,7 @@ the whole webpage.
 2. Open Settings.
 3. Go to Templates.
 4. Click Import.
-5. Select one of the JSON files in `web_clipper_templates/`.
+5. Select one of the JSON files in `web_clipper_templates/` or the vault-local
+   copy in `G:\我的雲端硬碟\ObsidianVault\90_System\web-clipper-templates\`.
 6. Move `Line Inspiration Web Clip` above the default template if you want it to trigger for
    normal `http` and `https` pages.

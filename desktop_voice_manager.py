@@ -83,7 +83,7 @@ DEFAULT_CONFIG = {
     "confirm_hotkey": "space",
     "language": "",
     "sample_rate": 16000,
-    "vault_path": r"G:/我的雲端硬碟/ObsidianVault/ObisdianVault",
+    "vault_path": r"G:/我的雲端硬碟/ObsidianVault",
     "thought_folder": "Sources/desktop-voice",
     "meeting_folder": "Meetings",
     "capture_dir": DEFAULT_CAPTURE_DIR,
