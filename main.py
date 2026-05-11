@@ -7,7 +7,7 @@ import threading
 import base64
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
-from flask import Flask, request, abort
+from flask import Flask, request, abort, send_from_directory
 from dotenv import load_dotenv
 from openai import OpenAI
 import google.generativeai as genai
@@ -30,6 +30,7 @@ from linebot.v3.messaging import (
     ReplyMessageRequest,
     PushMessageRequest,
     TextMessage,
+    ImageMessage as LineImageMessage,
     QuickReply,
     QuickReplyItem,
     MessageAction,
@@ -39,6 +40,29 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent, AudioMessageCo
 load_dotenv()
 
 app = Flask(__name__)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LINEBOT_USAGE_DIR = os.path.join(BASE_DIR, "docs", "linebot-usage")
+LINEBOT_USAGE_CARD_FILES = [
+    "linebot-usage-01-overview.png",
+    "linebot-usage-02-url-sources.png",
+    "linebot-usage-03-commands.png",
+    "linebot-usage-04-buttons.png",
+]
+LINEBOT_USAGE_HELP_TEXTS = {
+    "/?",
+    "/？",
+    "?",
+    "？",
+    "help",
+    "/help",
+    "功能",
+    "功能說明",
+    "使用說明",
+    "使用方法",
+    "按鈕",
+    "指令",
+}
 
 CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
@@ -300,6 +324,37 @@ def normalize_input_light(text: str) -> str:
     normalized = re.sub(r'[ \t]+', ' ', text or "").strip()
     normalized = re.sub(r'\n{3,}', '\n\n', normalized)
     return normalized
+
+
+def is_linebot_usage_help_request(text: str) -> bool:
+    compact = re.sub(r'\s+', '', text or "").lower()
+    return compact in LINEBOT_USAGE_HELP_TEXTS
+
+
+def get_public_base_url() -> str:
+    configured = (
+        os.getenv("LINE_BOT_PUBLIC_BASE_URL") or
+        os.getenv("PUBLIC_BASE_URL") or
+        os.getenv("APP_BASE_URL")
+    )
+    if configured:
+        return configured.rstrip("/")
+
+    proto = request.headers.get("X-Forwarded-Proto", request.scheme).split(",")[0].strip()
+    host = request.headers.get("X-Forwarded-Host", request.host).split(",")[0].strip()
+    return f"{proto}://{host}".rstrip("/")
+
+
+def build_linebot_usage_image_messages() -> list[LineImageMessage]:
+    base_url = get_public_base_url()
+    messages = []
+    for filename in LINEBOT_USAGE_CARD_FILES:
+        image_url = f"{base_url}/linebot-usage/{filename}"
+        messages.append(LineImageMessage(
+            originalContentUrl=image_url,
+            previewImageUrl=image_url,
+        ))
+    return messages
 
 
 def assess_extracted_content(content: str) -> dict:
@@ -3233,6 +3288,19 @@ def healthz():
     return {"status": "ok", "ts": datetime.now().isoformat()}, 200
 
 
+@app.route("/linebot-usage/<path:filename>", methods=["GET"])
+def linebot_usage_asset(filename):
+    """Serve LINE Bot usage cards for LINE image messages."""
+    if filename not in LINEBOT_USAGE_CARD_FILES:
+        abort(404)
+    return send_from_directory(
+        LINEBOT_USAGE_DIR,
+        filename,
+        mimetype="image/png",
+        max_age=86400,
+    )
+
+
 @app.route("/cron/weekly", methods=["POST", "GET"])
 def cron_weekly():
     """Weekly cron job: consolidate Sources → Wiki pages.
@@ -3361,6 +3429,20 @@ def handle_text_message(event):
         text = event.message.text.strip()
         user_id = event.source.user_id
         print(f"[DEBUG] Received text: {text}, user_id: {user_id}")
+
+        if is_linebot_usage_help_request(text):
+            usage_intro = (
+                "LINE Bot 功能說明\n\n"
+                "平常直接傳文字、網址、圖片或語音即可保存。"
+                "需要查詢或整理時，再輸入圖卡中的指令。"
+            )
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=usage_intro), *build_linebot_usage_image_messages()],
+                )
+            )
+            return
 
         # 今日回顧指令
         if text in ["今日回顧", "今天存了什麼", "回顧"]:

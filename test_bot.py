@@ -866,6 +866,42 @@ class TestFlaskRoutes:
         )
         assert response.status_code == 400
 
+    def test_linebot_usage_png_route(self):
+        """功能說明圖卡應可透過 Flask route 提供給 LINE"""
+        response = self.client.get("/linebot-usage/linebot-usage-01-overview.png")
+        assert response.status_code == 200
+        assert response.mimetype == "image/png"
+
+    def test_linebot_usage_route_rejects_unlisted_files(self):
+        """只允許公開 LINE 使用說明 PNG 圖卡"""
+        response = self.client.get("/linebot-usage/linebot-usage-01-overview.svg")
+        assert response.status_code == 404
+
+
+class TestLineBotUsageCards:
+    """測試 LINE Bot 功能說明圖卡訊息"""
+
+    def test_usage_help_trigger_texts(self):
+        assert main.is_linebot_usage_help_request("/?") is True
+        assert main.is_linebot_usage_help_request("/？") is True
+        assert main.is_linebot_usage_help_request("功能") is True
+        assert main.is_linebot_usage_help_request("按鈕") is True
+        assert main.is_linebot_usage_help_request("一般文字") is False
+
+    def test_build_usage_image_messages_from_forwarded_host(self):
+        with main.app.test_request_context(
+            "/callback",
+            headers={
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "example.com",
+            },
+        ):
+            messages = main.build_linebot_usage_image_messages()
+
+        assert len(messages) == 4
+        assert messages[0].original_content_url == "https://example.com/linebot-usage/linebot-usage-01-overview.png"
+        assert messages[0].preview_image_url == messages[0].original_content_url
+
 
 # ============================================================
 # 10.5 短網址解析測試
