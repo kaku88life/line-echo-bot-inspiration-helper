@@ -605,9 +605,15 @@ class TestCaptureQuality:
         assert main.is_linebot_drive_diagnostic_request("/drive-test") is True
         assert main.is_linebot_drive_diagnostic_request("一般文字") is False
 
+    def test_normalize_env_value_strips_outer_whitespace(self):
+        assert main.normalize_env_value(" 1FKetJOO ") == "1FKetJOO"
+        assert main.normalize_env_value("   ") is None
+        assert main.normalize_env_value(None) is None
+
     def test_build_gdrive_diagnostic_message_success(self):
         result = {
             "vault_configured": True,
+            "vault_id_trimmed": True,
             "credentials_source": "env_json",
             "root_name": "ObsidianVault",
             "root_accessible": True,
@@ -619,6 +625,7 @@ class TestCaptureQuality:
         }
         message = main.build_gdrive_diagnostic_message(result)
         assert "測試寫入：成功" in message
+        assert "Folder ID 空白修正：有" in message
         assert "ObsidianVault" in message
         assert "Sources/2026-05" in message
 

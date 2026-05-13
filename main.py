@@ -92,6 +92,14 @@ LINEBOT_DRIVE_DIAGNOSTIC_TEXTS = {
     "/drive",
 }
 
+
+def normalize_env_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
 CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -100,8 +108,9 @@ NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 NOTION_SOCIAL_DATABASE_ID = os.getenv("NOTION_SOCIAL_DATABASE_ID")
 APIFY_API_KEY = os.getenv("APIFY_API_KEY")
-GDRIVE_CREDENTIALS_FILE = os.getenv("GDRIVE_CREDENTIALS_FILE", "gdrive_credentials.json")
-GDRIVE_VAULT_FOLDER_ID = os.getenv("GDRIVE_VAULT_FOLDER_ID")
+GDRIVE_CREDENTIALS_FILE = normalize_env_value(os.getenv("GDRIVE_CREDENTIALS_FILE")) or "gdrive_credentials.json"
+GDRIVE_VAULT_FOLDER_ID_RAW = os.getenv("GDRIVE_VAULT_FOLDER_ID")
+GDRIVE_VAULT_FOLDER_ID = normalize_env_value(GDRIVE_VAULT_FOLDER_ID_RAW)
 GOOGLE_CALENDAR_IDS = [cid.strip() for cid in os.getenv("GOOGLE_CALENDAR_ID", "primary").split(",") if cid.strip()]
 CRON_SECRET = os.getenv("CRON_SECRET")
 
@@ -568,6 +577,7 @@ def run_gdrive_diagnostic(user_id: str | None = None) -> dict:
     now = datetime.now()
     result = {
         "vault_configured": bool(GDRIVE_VAULT_FOLDER_ID),
+        "vault_id_trimmed": bool(GDRIVE_VAULT_FOLDER_ID_RAW and GDRIVE_VAULT_FOLDER_ID_RAW != GDRIVE_VAULT_FOLDER_ID),
         "credentials_source": "env_json" if os.getenv("GDRIVE_CREDENTIALS_JSON") else "file",
         "root_name": "",
         "root_accessible": False,
@@ -638,6 +648,7 @@ def build_gdrive_diagnostic_message(result: dict) -> str:
     lines = [
         "Line Bot Drive 診斷結果",
         f"- Vault 設定：{'已設定' if result.get('vault_configured') else '未設定'}",
+        f"- Folder ID 空白修正：{'有，已自動移除' if result.get('vault_id_trimmed') else '無'}",
         f"- 憑證來源：{result.get('credentials_source') or 'unknown'}",
         f"- Drive 根資料夾：{result.get('root_name') or '無法讀取'}",
         f"- 根資料夾可讀：{'是' if result.get('root_accessible') else '否'}",
