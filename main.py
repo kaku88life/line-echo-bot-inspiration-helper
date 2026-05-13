@@ -78,6 +78,19 @@ LINEBOT_WORKFLOW_HELP_TEXTS = {
     "agent",
     "workflow",
 }
+LINEBOT_DRIVE_DIAGNOSTIC_TEXTS = {
+    "drive診斷",
+    "drive測試",
+    "儲存測試",
+    "儲存診斷",
+    "保存測試",
+    "obsidian診斷",
+    "obsidian測試",
+    "linebot診斷",
+    "linebot測試",
+    "/drive-test",
+    "/drive",
+}
 
 CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
@@ -351,6 +364,11 @@ def is_linebot_workflow_help_request(text: str) -> bool:
     return compact in LINEBOT_WORKFLOW_HELP_TEXTS
 
 
+def is_linebot_drive_diagnostic_request(text: str) -> bool:
+    compact = re.sub(r'\s+', '', text or "").lower()
+    return compact in LINEBOT_DRIVE_DIAGNOSTIC_TEXTS
+
+
 def get_public_base_url() -> str:
     configured = (
         os.getenv("LINE_BOT_PUBLIC_BASE_URL") or
@@ -528,6 +546,113 @@ def should_save_status_note_only(source_type: str, status: str) -> bool:
     return status == CAPTURE_STATUS_FAILED or (
         source_type in ["youtube", "google_maps", "ptt", "104"] and status == CAPTURE_STATUS_PARTIAL
     )
+
+
+def build_url_capture_push_message(file_id: str | None, status: str, source_type: str, title: str | None) -> str:
+    if file_id:
+        return (
+            f"網址已保存\n"
+            f"抓取狀態：{status}\n"
+            f"來源類型：{source_type}\n\n"
+            f"{title or '完整內容已存入 Obsidian'}"
+        )
+    return (
+        "網址已讀取，但保存到 Obsidian 失敗\n"
+        f"抓取狀態：{status}\n"
+        f"來源類型：{source_type}\n\n"
+        "請檢查 GDRIVE_VAULT_FOLDER_ID、Google Drive 權限或部署環境變數。"
+    )
+
+
+def run_gdrive_diagnostic(user_id: str | None = None) -> dict:
+    now = datetime.now()
+    result = {
+        "vault_configured": bool(GDRIVE_VAULT_FOLDER_ID),
+        "credentials_source": "env_json" if os.getenv("GDRIVE_CREDENTIALS_JSON") else "file",
+        "root_name": "",
+        "root_accessible": False,
+        "child_folders": {},
+        "write_success": False,
+        "file_name": "",
+        "relative_folder": f"Sources/{now.strftime('%Y-%m')}",
+        "error": "",
+    }
+    if not GDRIVE_VAULT_FOLDER_ID:
+        result["error"] = "GDRIVE_VAULT_FOLDER_ID is not configured"
+        return result
+    try:
+        service = get_gdrive_service()
+        root = service.files().get(
+            fileId=GDRIVE_VAULT_FOLDER_ID,
+            fields="name,mimeType,trashed",
+        ).execute()
+        result["root_name"] = root.get("name", "")
+        result["root_accessible"] = (
+            root.get("mimeType") == "application/vnd.google-apps.folder"
+            and not root.get("trashed", False)
+        )
+        for folder_name in ["Sources", "Meetings", "Wiki", "90_System"]:
+            safe_name = folder_name.replace("'", "\\'")
+            query = (
+                f"name='{safe_name}' and '{GDRIVE_VAULT_FOLDER_ID}' in parents "
+                "and mimeType='application/vnd.google-apps.folder' and trashed=false"
+            )
+            files = service.files().list(q=query, fields="files(id,name)").execute().get("files", [])
+            result["child_folders"][folder_name] = bool(files)
+
+        diagnostic_text = (
+            "Line Bot Drive diagnostic write test.\n\n"
+            f"Created at: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"User id present: {bool(user_id)}\n"
+            "If this note appears on the desktop vault, Google Drive sync is working."
+        )
+        file_id = save_to_gdrive(
+            title=f"LineBot Drive 診斷 {now.strftime('%Y-%m-%d %H:%M:%S')}",
+            content_type="系統診斷",
+            category="系統",
+            content=diagnostic_text,
+            keywords=["linebot", "drive", "diagnostic"],
+            user_id=user_id,
+            source_type="text",
+            capture_status=CAPTURE_STATUS_FULL,
+            extractor="linebot-drive-diagnostic",
+            needs_review=False,
+            raw_input="Drive 診斷",
+            normalized_input="Drive 診斷",
+        )
+        result["write_success"] = bool(file_id)
+        if file_id:
+            metadata = service.files().get(fileId=file_id, fields="name").execute()
+            result["file_name"] = metadata.get("name", "")
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {str(exc)[:180]}"
+    return result
+
+
+def build_gdrive_diagnostic_message(result: dict) -> str:
+    child_folders = result.get("child_folders") or {}
+    folder_status = ", ".join(
+        f"{name}={'OK' if child_folders.get(name) else 'missing'}"
+        for name in ["Sources", "Meetings", "Wiki", "90_System"]
+    )
+    lines = [
+        "Line Bot Drive 診斷結果",
+        f"- Vault 設定：{'已設定' if result.get('vault_configured') else '未設定'}",
+        f"- 憑證來源：{result.get('credentials_source') or 'unknown'}",
+        f"- Drive 根資料夾：{result.get('root_name') or '無法讀取'}",
+        f"- 根資料夾可讀：{'是' if result.get('root_accessible') else '否'}",
+        f"- 必要資料夾：{folder_status or '無法檢查'}",
+        f"- 測試寫入：{'成功' if result.get('write_success') else '失敗'}",
+    ]
+    if result.get("file_name"):
+        lines.append(f"- 測試檔案：{result['file_name']}")
+        lines.append(f"- 預期同步位置：{result.get('relative_folder')}")
+    if result.get("error"):
+        lines.append(f"- 錯誤：{result['error']}")
+    lines.append("")
+    lines.append("判讀：如果測試寫入成功但電腦 Obsidian 沒看到，請檢查 Google Drive for Desktop 同步。")
+    lines.append("如果測試寫入失敗，請檢查 Zeabur 的 Drive 環境變數與服務帳號權限。")
+    return "\n".join(lines)
 
 
 def social_extractor_name(platform: str) -> str:
@@ -3486,6 +3611,16 @@ def handle_text_message(event):
             )
             return
 
+        if is_linebot_drive_diagnostic_request(text):
+            diagnostic = run_gdrive_diagnostic(user_id=user_id)
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=build_gdrive_diagnostic_message(diagnostic))],
+                )
+            )
+            return
+
         # 今日回顧指令
         if text in ["今日回顧", "今天存了什麼", "回顧"]:
             files = get_today_files()
@@ -4504,6 +4639,7 @@ def handle_text_message(event):
                         print(f"[DEBUG] Summary: {page_summary[:100]}...")
                         parsed_url = parse_summary_response(page_summary)
                         title = parsed_url["title"] or u[:50]
+                        url_source_type = source_type_from_url(u)
                         fid = save_to_gdrive(
                             title=title,
                             content_type="URL摘要",
@@ -4512,7 +4648,7 @@ def handle_text_message(event):
                             source_url=u,
                             keywords=parsed_url["keywords"],
                             user_id=uid,
-                            source_type=source_type_from_url(u),
+                            source_type=url_source_type,
                             capture_status=quality["status"],
                             extractor=extractor,
                             needs_review=quality["needs_review"],
@@ -4526,7 +4662,12 @@ def handle_text_message(event):
                             push_api = MessagingApi(push_client)
                             push_api.push_message(PushMessageRequest(
                                 to=uid,
-                                messages=[TextMessage(text=f"網址已保存\n抓取狀態：{quality['status']}\n來源類型：{source_type_from_url(u)}\n\n{(parsed_url['title'] or '完整內容已存入 Obsidian')}")]
+                                messages=[TextMessage(text=build_url_capture_push_message(
+                                    fid,
+                                    quality["status"],
+                                    url_source_type,
+                                    parsed_url["title"],
+                                ))]
                             ))
                         print(f"[DEBUG] URL summary pushed successfully")
                     except Exception as ex:

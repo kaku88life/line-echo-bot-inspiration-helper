@@ -64,13 +64,15 @@ COMBO_PRESETS = {
     "meeting_hotkey": ["ctrl+alt+c", "ctrl+shift+c", "ctrl+alt+m", "ctrl+shift+m"],
     "translate_en_hotkey": ["ctrl+alt+e", "ctrl+shift+e"],
     "translate_ja_hotkey": ["ctrl+alt+j", "ctrl+shift+j"],
-    "confirm_hotkey": ["space", "none", "ctrl+space", "alt+space", "f8", "f9", "f10"],
+    "confirm_hotkey": ["none", "f8", "f9", "f10", "ctrl+space", "alt+space", "space"],
     "language": ["", "zh", "en", "ja"],
     "sample_rate": ["16000", "44100", "48000"],
     "overlay_idle_seconds": ["0", "3", "5", "8", "10", "15"],
     "overlay_font_scale": ["0.9", "1.0", "1.1", "1.15", "1.25", "1.35"],
     "min_rms": ["0.001", "0.002", "0.003", "0.005", "0.008"],
     "min_peak": ["0.008", "0.015", "0.02", "0.03", "0.05"],
+    "silence_pause_seconds": ["0", "5", "8", "10", "15", "20"],
+    "silence_keep_seconds": ["0", "0.3", "0.6", "1.0", "1.5"],
 }
 
 DEFAULT_CONFIG = {
@@ -80,7 +82,7 @@ DEFAULT_CONFIG = {
     "meeting_hotkey": "ctrl+alt+c",
     "translate_en_hotkey": "ctrl+alt+e",
     "translate_ja_hotkey": "ctrl+alt+j",
-    "confirm_hotkey": "space",
+    "confirm_hotkey": "none",
     "language": "",
     "sample_rate": 16000,
     "vault_path": r"G:/我的雲端硬碟/ObsidianVault",
@@ -93,6 +95,8 @@ DEFAULT_CONFIG = {
     "overlay_font_scale": 1.15,
     "min_rms": 0.001,
     "min_peak": 0.008,
+    "silence_pause_seconds": 10,
+    "silence_keep_seconds": 0.6,
     "thought_paste": False,
     "no_overlay": False,
     "no_normalize": False,
@@ -336,6 +340,8 @@ class DesktopVoiceManager:
             ("overlay_font_scale", "面板字體縮放"),
             ("min_rms", "最小 RMS 音量"),
             ("min_peak", "最小 Peak 音量"),
+            ("silence_pause_seconds", "靜音暫停秒數"),
+            ("silence_keep_seconds", "靜音保留秒數"),
         ]:
             row = self._add_combo(parent, row, key, label, COMBO_PRESETS[key])
 
@@ -402,7 +408,7 @@ class DesktopVoiceManager:
             value = var.get()
             if key == "mode":
                 value = parse_mode_value(value)
-            elif key in {"overlay_idle_seconds", "overlay_font_scale", "min_rms", "min_peak"}:
+            elif key in {"overlay_idle_seconds", "overlay_font_scale", "min_rms", "min_peak", "silence_pause_seconds", "silence_keep_seconds"}:
                 try:
                     value = float(value)
                 except ValueError as exc:

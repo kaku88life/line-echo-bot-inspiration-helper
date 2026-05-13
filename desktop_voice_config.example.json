@@ -5,7 +5,7 @@
   "meeting_hotkey": "ctrl+alt+c",
   "translate_en_hotkey": "ctrl+alt+e",
   "translate_ja_hotkey": "ctrl+alt+j",
-  "confirm_hotkey": "space",
+  "confirm_hotkey": "none",
   "language": "",
   "sample_rate": 16000,
   "vault_path": "G:/我的雲端硬碟/ObsidianVault",
@@ -18,6 +18,8 @@
   "overlay_font_scale": 1.15,
   "min_rms": 0.001,
   "min_peak": 0.008,
+  "silence_pause_seconds": 10,
+  "silence_keep_seconds": 0.6,
   "thought_paste": false,
   "no_overlay": false,
   "no_normalize": false

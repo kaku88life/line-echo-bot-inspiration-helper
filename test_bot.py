@@ -589,6 +589,38 @@ class TestCaptureQuality:
     def test_status_note_only_for_youtube_partial(self):
         assert main.should_save_status_note_only("youtube", main.CAPTURE_STATUS_PARTIAL) is True
         assert main.should_save_status_note_only("webpage", main.CAPTURE_STATUS_PARTIAL) is False
+        assert main.should_save_status_note_only("webpage", main.CAPTURE_STATUS_FAILED) is True
+
+    def test_build_url_capture_push_message_requires_file_id(self):
+        success = main.build_url_capture_push_message("file123", "full", "webpage", "測試頁")
+        assert "網址已保存" in success
+        assert "測試頁" in success
+
+        failed = main.build_url_capture_push_message(None, "full", "webpage", "測試頁")
+        assert "保存到 Obsidian 失敗" in failed
+        assert "網址已保存" not in failed
+
+    def test_linebot_drive_diagnostic_request_aliases(self):
+        assert main.is_linebot_drive_diagnostic_request("Drive 診斷") is True
+        assert main.is_linebot_drive_diagnostic_request("/drive-test") is True
+        assert main.is_linebot_drive_diagnostic_request("一般文字") is False
+
+    def test_build_gdrive_diagnostic_message_success(self):
+        result = {
+            "vault_configured": True,
+            "credentials_source": "env_json",
+            "root_name": "ObsidianVault",
+            "root_accessible": True,
+            "child_folders": {"Sources": True, "Meetings": True, "Wiki": True, "90_System": True},
+            "write_success": True,
+            "file_name": "2026-05-13-223000-系統診斷-LineBot Drive 診斷.md",
+            "relative_folder": "Sources/2026-05",
+            "error": "",
+        }
+        message = main.build_gdrive_diagnostic_message(result)
+        assert "測試寫入：成功" in message
+        assert "ObsidianVault" in message
+        assert "Sources/2026-05" in message
 
     def test_format_weekly_review_counts_status(self):
         notes = [
@@ -2477,6 +2509,7 @@ class TestDesktopVoiceCapture:
     def test_desktop_voice_hallucination_patterns(self):
         assert desktop_voice.is_hallucination("記得幫我訂閱、按讚及分享唷") is True
         assert desktop_voice.is_hallucination("ご視聴ありがとうございました。") is True
+        assert desktop_voice.is_hallucination("いいねボタンと購読ボタンをクリックしてください。私はあなたを愛しています。") is True
 
     def test_desktop_voice_valid_transcript(self):
         assert desktop_voice.is_hallucination("這是我今天讀書想到的一個重點") is False
@@ -2486,6 +2519,31 @@ class TestDesktopVoiceCapture:
         level = desktop_voice.get_audio_level(audio)
         assert level["rms"] == 0.0
         assert level["peak"] == 0.0
+
+    def test_desktop_voice_auto_pause_drops_long_silence(self):
+        recorder = desktop_voice.Recorder(
+            sample_rate=10,
+            min_rms=0.1,
+            min_peak=0.1,
+            silence_pause_seconds=1.0,
+            silence_keep_seconds=0.2,
+        )
+        speech = desktop_voice.np.full((5, 1), 0.5, dtype="float32")
+        silence = desktop_voice.np.zeros((5, 1), dtype="float32")
+
+        recorder._callback(speech, len(speech), None, None)
+        recorder._callback(silence, len(silence), None, None)
+        recorder._callback(silence, len(silence), None, None)
+        recorder._callback(silence, len(silence), None, None)
+
+        assert recorder.auto_paused is True
+        assert recorder.auto_pause_count == 1
+        assert recorder.recorded_audio_seconds == pytest.approx(0.5)
+
+        recorder._callback(speech, len(speech), None, None)
+
+        assert recorder.auto_paused is False
+        assert recorder.recorded_audio_seconds == pytest.approx(1.2)
 
     def test_desktop_voice_shortcut_text(self):
         args = SimpleNamespace(
@@ -2520,8 +2578,18 @@ class TestDesktopVoiceCapture:
         assert "f8" in result
         assert "Enter" not in result
         assert "空白" not in result
-        assert "英文" in result
-        assert "日文" in result
+        assert "浮窗按鈕" in result
+        assert "取消按鈕" in result
+
+    def test_desktop_voice_control_text_without_confirm_hotkey(self):
+        args = SimpleNamespace(confirm_hotkey="none")
+        result = desktop_voice.get_control_text(args)
+        assert "空白" not in result
+        assert "開始或停止" not in result
+        assert "浮窗按鈕" in result
+        assert "取消按鈕" in result
+        assert "1 快速輸入" not in result
+        assert "Esc" not in result
 
     def test_desktop_voice_load_dictionary(self, tmp_path):
         dictionary = tmp_path / "voice_dictionary.txt"

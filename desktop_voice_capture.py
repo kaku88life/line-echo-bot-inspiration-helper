@@ -51,9 +51,11 @@ DEFAULT_THOUGHT_HOTKEY = "ctrl+alt+x"
 DEFAULT_MEETING_HOTKEY = "ctrl+alt+c"
 DEFAULT_TRANSLATE_EN_HOTKEY = "ctrl+alt+e"
 DEFAULT_TRANSLATE_JA_HOTKEY = "ctrl+alt+j"
-DEFAULT_CONFIRM_HOTKEY = "space"
+DEFAULT_CONFIRM_HOTKEY = "none"
 DEFAULT_MIN_RMS = 0.001
 DEFAULT_MIN_PEAK = 0.008
+DEFAULT_SILENCE_PAUSE_SECONDS = 10.0
+DEFAULT_SILENCE_KEEP_SECONDS = 0.6
 DEFAULT_VAULT_PATH = r"G:\我的雲端硬碟\ObsidianVault"
 DEFAULT_CAPTURE_DIR = "desktop-captures"
 DEFAULT_OVERLAY_IDLE_SECONDS = 0.0
@@ -106,6 +108,8 @@ HALLUCINATION_PATTERNS = [
     "like and subscribe",
     "thanks for watching",
     "ご視聴ありがとうございました",
+    "いいねボタンと購読ボタン",
+    "私はあなたを愛しています",
     "字幕由",
     "字幕提供",
     "subtitles by",
@@ -228,11 +232,46 @@ def focus_window_by_title(title: str) -> bool:
     try:
         import ctypes
         hwnd = ctypes.windll.user32.FindWindowW(None, title)
-        if not hwnd:
+        return focus_window_handle(hwnd)
+    except Exception:
+        return False
+
+
+def focus_window_handle(hwnd) -> bool:
+    if sys.platform != "win32" or not hwnd:
+        return False
+    try:
+        import ctypes
+        if not ctypes.windll.user32.IsWindow(hwnd):
             return False
-        ctypes.windll.user32.ShowWindow(hwnd, 9)
+        if ctypes.windll.user32.IsIconic(hwnd):
+            ctypes.windll.user32.ShowWindow(hwnd, 9)
         ctypes.windll.user32.SetForegroundWindow(hwnd)
         return True
+    except Exception:
+        return False
+
+
+def get_foreground_window_handle():
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        return hwnd or None
+    except Exception:
+        return None
+
+
+def is_current_process_window(hwnd) -> bool:
+    if sys.platform != "win32" or not hwnd:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        process_id = wintypes.DWORD()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+        return process_id.value == os.getpid()
     except Exception:
         return False
 
@@ -302,20 +341,11 @@ def get_shortcuts_text(args) -> str:
 
 
 def get_control_text(args=None) -> str:
-    lines = ["再按目前模式快捷鍵開始/停止"]
+    lines = ["再按目前模式快捷鍵開始/停止", "也可以使用浮窗按鈕控制錄音"]
     confirm_hotkey = get_confirm_hotkey(args)
     if confirm_hotkey:
         lines.append(f"{format_hotkey_label(confirm_hotkey)} 開始或停止")
-    lines.extend(
-        [
-            "1 快速輸入",
-            "2 語音思考",
-            "3 會議記錄",
-            "4 英文翻譯",
-            "5 日文翻譯",
-            "Esc 隱藏或取消",
-        ]
-    )
+    lines.append("取消請按浮窗的取消按鈕")
     return "\n".join(lines)
 
 
@@ -424,7 +454,7 @@ def describe_recording_skip(recorder: Recorder) -> tuple[str, str, str]:
         )
     elif reason == "too_short":
         title = "錄音太短"
-        detail = f"錄音約 {duration:.1f} 秒，已略過。請按下開始後再說話，說完再按 Space。"
+        detail = f"錄音約 {duration:.1f} 秒，已略過。請按下開始後再說話，說完再按停止。"
     elif reason == "no_audio_frames":
         title = "沒有收到麥克風音訊"
         detail = "錄音期間沒有收到音訊資料，請檢查 Windows 麥克風輸入裝置。"
@@ -585,11 +615,15 @@ class StatusOverlay:
         enabled: bool = True,
         idle_seconds: float = DEFAULT_OVERLAY_IDLE_SECONDS,
         font_scale: float = DEFAULT_OVERLAY_FONT_SCALE,
+        on_confirm=None,
+        on_cancel=None,
     ) -> None:
         self.enabled = enabled and tk is not None
         self.queue: queue.Queue[tuple[str, str, str]] = queue.Queue()
         self.idle_seconds = max(0.0, idle_seconds)
         self.font_scale = max(0.8, min(2.0, font_scale))
+        self.on_confirm = on_confirm
+        self.on_cancel = on_cancel
         self.root = None
         self.title_var = None
         self.body_var = None
@@ -597,6 +631,8 @@ class StatusOverlay:
         self.hide_after_id = None
         self.is_hidden = False
         self.ui_thread_id = None
+        self.confirm_button = None
+        self.last_external_hwnd = None
 
     def start(self, initial_title: str, initial_body: str) -> None:
         if not self.enabled:
@@ -626,6 +662,16 @@ class StatusOverlay:
                   activebackground="#374151", activeforeground="#ffffff",
                   relief="flat", padx=10, pady=3,
                   font=("Microsoft JhengHei UI", 10)).pack(side="right", padx=(6, 0))
+        self.confirm_button = tk.Button(header, text="開始", command=self._invoke_confirm, bg="#2563eb", fg="#eff6ff",
+                                        activebackground="#1d4ed8", activeforeground="#ffffff",
+                                        disabledforeground="#bfdbfe",
+                                        relief="flat", padx=10, pady=3,
+                                        font=("Microsoft JhengHei UI", 10, "bold"))
+        self.confirm_button.pack(side="right", padx=(6, 0))
+        tk.Button(header, text="取消", command=self._invoke_cancel, bg="#374151", fg="#f3f4f6",
+                  activebackground="#4b5563", activeforeground="#ffffff",
+                  relief="flat", padx=10, pady=3,
+                  font=("Microsoft JhengHei UI", 10)).pack(side="right", padx=(6, 0))
         tk.Button(header, text="隱藏", command=self.hide, bg="#1f2937", fg="#d1d5db",
                   activebackground="#374151", activeforeground="#ffffff",
                   relief="flat", padx=10, pady=3,
@@ -639,12 +685,29 @@ class StatusOverlay:
         self.root.update_idletasks()
         self._position_window()
         self.root.after(120, self._drain_queue)
+        self.root.after(200, self._poll_foreground_window)
         self.root.mainloop()
 
     def set(self, status: str, title: str, body: str) -> None:
         if not self.enabled:
             return
         self.queue.put((status, title, body))
+
+    def _invoke_confirm(self) -> None:
+        if callable(self.on_confirm):
+            self.on_confirm()
+
+    def _invoke_cancel(self) -> None:
+        if callable(self.on_cancel):
+            self.on_cancel()
+
+    def remember_foreground_window(self) -> None:
+        hwnd = get_foreground_window_handle()
+        if hwnd and not is_current_process_window(hwnd):
+            self.last_external_hwnd = hwnd
+
+    def restore_last_external_window(self) -> bool:
+        return focus_window_handle(self.last_external_hwnd)
 
     def hide(self) -> None:
         if not self.enabled or not self.root:
@@ -688,6 +751,12 @@ class StatusOverlay:
         y = max(24, screen_h - height - 64)
         self.root.geometry(f"{width}x{height}+{x}+{y}")
 
+    def _poll_foreground_window(self) -> None:
+        if not self.root:
+            return
+        self.remember_foreground_window()
+        self.root.after(250, self._poll_foreground_window)
+
     def _drain_queue(self) -> None:
         if not self.root:
             return
@@ -696,14 +765,47 @@ class StatusOverlay:
             if status == "__hide__":
                 self._hide_now()
                 continue
+            self.remember_foreground_window()
             self.show()
             self.status_var.set(status)
             self.title_var.set(title)
             self.body_var.set(body)
+            self._update_confirm_button(status)
             self.root.update_idletasks()
             self._position_window()
             self._schedule_hide_if_idle(status)
         self.root.after(120, self._drain_queue)
+
+    def _update_confirm_button(self, status: str) -> None:
+        if not self.confirm_button:
+            return
+        if status == "錄音中":
+            self.confirm_button.configure(
+                text="停止",
+                bg="#dc2626",
+                fg="#fef2f2",
+                activebackground="#b91c1c",
+                activeforeground="#ffffff",
+                state="normal",
+            )
+        elif status in {"轉文字中", "整理中", "翻譯中", "處理中"}:
+            self.confirm_button.configure(
+                text="處理中",
+                bg="#475569",
+                fg="#e2e8f0",
+                activebackground="#475569",
+                activeforeground="#e2e8f0",
+                state="disabled",
+            )
+        else:
+            self.confirm_button.configure(
+                text="開始",
+                bg="#2563eb",
+                fg="#eff6ff",
+                activebackground="#1d4ed8",
+                activeforeground="#ffffff",
+                state="normal",
+            )
 
     def _schedule_hide_if_idle(self, status: str) -> None:
         self._cancel_hide_timer()
@@ -726,20 +828,34 @@ class Recorder:
     sample_rate: int = DEFAULT_SAMPLE_RATE
     min_rms: float = DEFAULT_MIN_RMS
     min_peak: float = DEFAULT_MIN_PEAK
+    silence_pause_seconds: float = DEFAULT_SILENCE_PAUSE_SECONDS
+    silence_keep_seconds: float = DEFAULT_SILENCE_KEEP_SECONDS
     frames: list = field(default_factory=list)
+    pending_silence_frames: list = field(default_factory=list)
     stream: object | None = None
     started_at: float | None = None
     last_skip_reason: str | None = None
     last_audio_level: dict[str, float] = field(default_factory=dict)
     last_duration: float = 0.0
+    pending_silence_seconds: float = 0.0
+    recorded_audio_seconds: float = 0.0
+    auto_paused: bool = False
+    auto_pause_count: int = 0
+    on_auto_pause: object | None = None
+    on_auto_resume: object | None = None
 
     def start(self, mode_label: str, shortcuts_text: str) -> None:
         if self.stream:
             return
         self.frames = []
+        self.pending_silence_frames = []
         self.last_skip_reason = None
         self.last_audio_level = {}
         self.last_duration = 0.0
+        self.pending_silence_seconds = 0.0
+        self.recorded_audio_seconds = 0.0
+        self.auto_paused = False
+        self.auto_pause_count = 0
         self.started_at = time.time()
         self.stream = sd.InputStream(
             samplerate=self.sample_rate,
@@ -752,6 +868,13 @@ class Recorder:
         message = f"錄音中：{mode_label}\n再次按目前快捷鍵停止。\n{shortcuts_text}"
         notify("Desktop Voice Capture", message)
         print(message)
+
+    def get_recording_stats(self) -> dict[str, float | int]:
+        return {
+            "duration_seconds": round(self.last_duration, 3),
+            "recorded_audio_seconds": round(self.recorded_audio_seconds, 3),
+            "auto_pause_count": self.auto_pause_count,
+        }
 
     def stop(self) -> str | None:
         if not self.stream:
@@ -795,14 +918,83 @@ class Recorder:
         self.stream.close()
         self.stream = None
         self.frames = []
+        self.pending_silence_frames = []
         self.started_at = None
+        self.pending_silence_seconds = 0.0
+        self.auto_paused = False
         beep("error")
         notify("Desktop Voice Capture", "錄音已取消，沒有輸出。")
 
     def _callback(self, indata, frames, time_info, status) -> None:
         if status:
             print(f"Audio status: {status}")
-        self.frames.append(indata.copy())
+        chunk = indata.copy()
+        chunk_seconds = len(chunk) / float(self.sample_rate)
+        level = get_audio_level(chunk)
+        self.last_audio_level = level
+        has_voice = level["rms"] >= self.min_rms or level["peak"] >= self.min_peak
+        if has_voice:
+            was_paused = self.auto_paused
+            self._append_pending_silence_tail()
+            self.frames.append(chunk)
+            self.recorded_audio_seconds += chunk_seconds
+            self.pending_silence_seconds = 0.0
+            self.pending_silence_frames = []
+            if was_paused:
+                self.auto_paused = False
+                self._notify_auto_resume()
+            return
+
+        self.pending_silence_frames.append(chunk)
+        self.pending_silence_seconds += chunk_seconds
+        self._trim_pending_silence_buffer()
+        if (
+            self.silence_pause_seconds > 0
+            and self.pending_silence_seconds >= self.silence_pause_seconds
+            and not self.auto_paused
+        ):
+            self.auto_paused = True
+            self.auto_pause_count += 1
+            self._notify_auto_pause()
+
+    def _append_pending_silence_tail(self) -> None:
+        if not self.pending_silence_frames or self.silence_keep_seconds <= 0:
+            self.pending_silence_frames = []
+            return
+        silence_audio = np.concatenate(self.pending_silence_frames, axis=0)
+        samples_to_keep = int(self.sample_rate * self.silence_keep_seconds)
+        if samples_to_keep > 0 and len(silence_audio) > samples_to_keep:
+            silence_audio = silence_audio[-samples_to_keep:]
+        self.frames.append(silence_audio)
+        self.recorded_audio_seconds += len(silence_audio) / float(self.sample_rate)
+        self.pending_silence_frames = []
+
+    def _trim_pending_silence_buffer(self) -> None:
+        if not self.pending_silence_frames:
+            return
+        keep_seconds = max(self.silence_keep_seconds, 0.1)
+        max_samples = int(self.sample_rate * keep_seconds)
+        if max_samples <= 0:
+            self.pending_silence_frames = []
+            return
+        silence_audio = np.concatenate(self.pending_silence_frames, axis=0)
+        if len(silence_audio) > max_samples:
+            silence_audio = silence_audio[-max_samples:]
+        self.pending_silence_frames = [silence_audio]
+
+    def _notify_auto_pause(self) -> None:
+        if callable(self.on_auto_pause):
+            try:
+                self.on_auto_pause(self)
+            except Exception:
+                pass
+
+    def _notify_auto_resume(self) -> None:
+        if callable(self.on_auto_resume):
+            try:
+                self.on_auto_resume(self)
+            except Exception:
+                pass
 
 
 def get_openai_client() -> OpenAI:
@@ -863,22 +1055,36 @@ def normalize_transcript(client: OpenAI, text: str, args=None) -> str:
         return text
 
 
-def paste_text(text: str) -> None:
+def paste_text(text: str, target_window=None) -> None:
     if not text.strip():
         print("Transcript is empty; nothing pasted.")
         return
     pyperclip.copy(text)
-    time.sleep(0.1)
+    if target_window:
+        focus_window_handle(target_window)
+        time.sleep(0.2)
+    else:
+        time.sleep(0.1)
     keyboard.send("ctrl+v")
     beep("done")
     notify("Desktop Voice Capture", "已貼上轉文字內容。")
     print("Transcript pasted.")
 
 
-def process_audio(audio_path: str, args, mode: str | None = None, overlay: StatusOverlay | None = None) -> None:
+def process_audio(
+    audio_path: str,
+    args,
+    mode: str | None = None,
+    overlay: StatusOverlay | None = None,
+    duration_seconds: float | None = None,
+    recording_stats: dict | None = None,
+) -> None:
     mode = mode or args.mode
     mode_label = get_mode_label(mode)
     client = get_openai_client()
+    base_recording_fields = dict(recording_stats or {})
+    if duration_seconds is not None:
+        base_recording_fields.setdefault("duration_seconds", round(duration_seconds, 3))
     try:
         if overlay:
             overlay.set("轉文字中", f"正在處理：{mode_label}", "Whisper 轉文字中，請稍候。")
@@ -895,6 +1101,7 @@ def process_audio(audio_path: str, args, mode: str | None = None, overlay: Statu
                 "mode_label": mode_label,
                 "status": "skipped",
                 "reason": "empty_transcript",
+                **base_recording_fields,
                 "transcript": "",
             })
             return
@@ -912,18 +1119,21 @@ def process_audio(audio_path: str, args, mode: str | None = None, overlay: Statu
                 "mode_label": mode_label,
                 "status": "skipped",
                 "reason": "likely_hallucination",
+                **base_recording_fields,
                 "transcript": transcript,
             })
             return
         if overlay:
             overlay.set("整理中", f"正在整理：{mode_label}", "輕度修正標點與斷句。")
         output = transcript if args.no_normalize else normalize_transcript(client, transcript, args=args)
+        paste_target = overlay.last_external_hwnd if overlay else None
         if mode == "paste":
-            paste_text(output)
+            paste_text(output, target_window=paste_target)
             append_history(args, {
                 "mode": mode,
                 "mode_label": mode_label,
                 "status": "pasted",
+                **base_recording_fields,
                 "transcript": transcript,
                 "output": output,
             })
@@ -933,11 +1143,12 @@ def process_audio(audio_path: str, args, mode: str | None = None, overlay: Statu
             if overlay:
                 overlay.set("翻譯中", f"正在輸出：{mode_label}", "整理並翻譯成指定語言。")
             translated = translate_transcript(client, output, TRANSLATION_TARGETS[mode], args=args)
-            paste_text(translated)
+            paste_text(translated, target_window=paste_target)
             append_history(args, {
                 "mode": mode,
                 "mode_label": mode_label,
                 "status": "translated",
+                **base_recording_fields,
                 "target_language": TRANSLATION_TARGETS[mode],
                 "transcript": transcript,
                 "output": output,
@@ -950,12 +1161,13 @@ def process_audio(audio_path: str, args, mode: str | None = None, overlay: Statu
             content = build_voice_note(mode, title, output, transcript)
             note_path = write_markdown_note(mode, title, content, args)
             if args.thought_paste:
-                paste_text(output)
+                paste_text(output, target_window=paste_target)
             beep("done")
             append_history(args, {
                 "mode": mode,
                 "mode_label": mode_label,
                 "status": "saved",
+                **base_recording_fields,
                 "title": title,
                 "note_path": str(note_path),
                 "transcript": transcript,
@@ -976,6 +1188,7 @@ def process_audio(audio_path: str, args, mode: str | None = None, overlay: Statu
                 "mode": mode,
                 "mode_label": mode_label,
                 "status": "saved",
+                **base_recording_fields,
                 "title": title,
                 "note_path": str(note_path),
                 "transcript": transcript,
@@ -995,17 +1208,34 @@ def process_audio(audio_path: str, args, mode: str | None = None, overlay: Statu
 
 
 def run_once(args) -> None:
-    recorder = Recorder(sample_rate=args.sample_rate, min_rms=args.min_rms, min_peak=args.min_peak)
+    recorder = Recorder(
+        sample_rate=args.sample_rate,
+        min_rms=args.min_rms,
+        min_peak=args.min_peak,
+        silence_pause_seconds=args.silence_pause_seconds,
+        silence_keep_seconds=args.silence_keep_seconds,
+    )
     input("Press Enter to start recording.")
     recorder.start(get_mode_label(args.mode), get_shortcuts_text(args))
     input("Press Enter to stop recording.")
     audio_path = recorder.stop()
     if audio_path:
-        process_audio(audio_path, args)
+        process_audio(
+            audio_path,
+            args,
+            duration_seconds=recorder.last_duration,
+            recording_stats=recorder.get_recording_stats(),
+        )
 
 
 def run_hotkey_listener(args) -> None:
-    recorder = Recorder(sample_rate=args.sample_rate, min_rms=args.min_rms, min_peak=args.min_peak)
+    recorder = Recorder(
+        sample_rate=args.sample_rate,
+        min_rms=args.min_rms,
+        min_peak=args.min_peak,
+        silence_pause_seconds=args.silence_pause_seconds,
+        silence_keep_seconds=args.silence_keep_seconds,
+    )
     overlay = StatusOverlay(
         enabled=not args.no_overlay,
         idle_seconds=args.overlay_idle_seconds,
@@ -1022,6 +1252,25 @@ def run_hotkey_listener(args) -> None:
     def set_overlay(status: str, title: str, body: str = "") -> None:
         overlay.set(status, title, body or get_shortcuts_text(args))
 
+    def handle_auto_pause(rec: Recorder) -> None:
+        mode_label = get_mode_label(state["active_mode"] or args.mode)
+        set_overlay(
+            "暫停中",
+            f"自動暫停：{mode_label}",
+            f"連續 {rec.silence_pause_seconds:.0f} 秒低於音量門檻，已暫停收進音檔；偵測到說話會自動續錄。",
+        )
+
+    def handle_auto_resume(_rec: Recorder) -> None:
+        mode_label = get_mode_label(state["active_mode"] or args.mode)
+        set_overlay(
+            "錄音中",
+            f"錄音中：{mode_label}",
+            "已偵測到語音並自動續錄。再按目前模式快捷鍵或浮窗停止。",
+        )
+
+    recorder.on_auto_pause = handle_auto_pause
+    recorder.on_auto_resume = handle_auto_resume
+
     def remove_control_hotkeys() -> None:
         hotkey_ids = state.get("control_hotkeys", [])
         for hotkey_id in hotkey_ids:
@@ -1034,26 +1283,14 @@ def run_hotkey_listener(args) -> None:
     def add_control_hotkeys() -> None:
         if state.get("control_hotkeys"):
             return
-        controls = [
-            ("esc", cancel_or_hide),
-            ("1", lambda: arm_mode("paste")),
-            ("2", lambda: arm_mode("thought")),
-            ("3", lambda: arm_mode("meeting")),
-            ("4", lambda: arm_mode("translate_en")),
-            ("5", lambda: arm_mode("translate_ja")),
-            ("p", lambda: arm_mode("paste")),
-            ("t", lambda: arm_mode("thought")),
-            ("m", lambda: arm_mode("meeting")),
-            ("e", lambda: arm_mode("translate_en")),
-            ("j", lambda: arm_mode("translate_ja")),
-        ]
+        controls = []
         confirm_hotkey = get_confirm_hotkey(args)
         if confirm_hotkey:
             controls.insert(0, (confirm_hotkey, confirm_control))
         hotkey_ids = []
         for key, callback in controls:
             try:
-                hotkey_ids.append(keyboard.add_hotkey(key, callback, suppress=True))
+                hotkey_ids.append(keyboard.add_hotkey(key, callback, suppress=False))
             except Exception as exc:
                 print(f"Failed to register control hotkey {key}: {exc}")
         state["control_hotkeys"] = hotkey_ids
@@ -1068,7 +1305,7 @@ def run_hotkey_listener(args) -> None:
         confirm_hotkey = get_confirm_hotkey(args)
         if confirm_hotkey:
             stop_lines.append(f"{format_hotkey_label(confirm_hotkey)} 停止並輸出")
-        stop_lines.append("Esc 取消錄音")
+        stop_lines.append("也可按浮窗停止或取消")
         set_overlay("錄音中", f"錄音中：{mode_label}", "\n".join(stop_lines))
 
     def show_overlay_without_action_locked() -> None:
@@ -1078,7 +1315,7 @@ def run_hotkey_listener(args) -> None:
             confirm_hotkey = get_confirm_hotkey(args)
             if confirm_hotkey:
                 stop_lines.append(f"{format_hotkey_label(confirm_hotkey)} 停止並輸出")
-            stop_lines.append("Esc 取消錄音")
+            stop_lines.append("也可按浮窗停止或取消")
             set_overlay("錄音中", f"錄音中：{active_label}", "\n".join(stop_lines))
             return
         state["active_mode"] = None
@@ -1089,12 +1326,18 @@ def run_hotkey_listener(args) -> None:
     def finish_recording_locked(mode: str) -> None:
         mode_label = get_mode_label(mode)
         audio_path = recorder.stop()
+        duration_seconds = recorder.last_duration
+        recording_stats = recorder.get_recording_stats()
         state["active_mode"] = None
         state["armed"] = False
         if audio_path:
             state["processing"] = True
             set_overlay("轉文字中", f"正在處理：{mode_label}", "Whisper 轉文字中，請稍候。")
-            threading.Thread(target=process_in_background, args=(audio_path, mode), daemon=True).start()
+            threading.Thread(
+                target=process_in_background,
+                args=(audio_path, mode, duration_seconds, recording_stats),
+                daemon=True,
+            ).start()
         else:
             remove_control_hotkeys()
             reason, title, detail = describe_recording_skip(recorder)
@@ -1103,14 +1346,21 @@ def run_hotkey_listener(args) -> None:
                 "mode_label": mode_label,
                 "status": "skipped",
                 "reason": reason,
-                "duration_seconds": round(recorder.last_duration, 3),
+                **recording_stats,
                 "audio_level": recorder.last_audio_level,
             })
             set_overlay("已略過", title, f"{detail}\n\n{get_shortcuts_text(args)}")
 
-    def process_in_background(audio_path: str, mode: str) -> None:
+    def process_in_background(audio_path: str, mode: str, duration_seconds: float, recording_stats: dict) -> None:
         try:
-            process_audio(audio_path, args, mode=mode, overlay=overlay)
+            process_audio(
+                audio_path,
+                args,
+                mode=mode,
+                overlay=overlay,
+                duration_seconds=duration_seconds,
+                recording_stats=recording_stats,
+            )
         finally:
             with lock:
                 state["processing"] = False
@@ -1177,11 +1427,31 @@ def run_hotkey_listener(args) -> None:
             set_overlay("待命", "桌面語音待命中", get_shortcuts_text(args))
             overlay.hide()
 
-    keyboard.add_hotkey(args.paste_hotkey, lambda: arm_mode("paste"))
-    keyboard.add_hotkey(args.thought_hotkey, lambda: arm_mode("thought"))
-    keyboard.add_hotkey(args.meeting_hotkey, lambda: arm_mode("meeting"))
-    keyboard.add_hotkey(args.translate_en_hotkey, lambda: arm_mode("translate_en"))
-    keyboard.add_hotkey(args.translate_ja_hotkey, lambda: arm_mode("translate_ja"))
+    overlay.on_confirm = confirm_control
+    overlay.on_cancel = cancel_or_hide
+
+    mode_hotkey_ids = []
+
+    def register_mode_hotkey(key: str, mode: str) -> None:
+        try:
+            mode_hotkey_ids.append(keyboard.add_hotkey(key, lambda: arm_mode(mode), suppress=False))
+        except Exception as exc:
+            message = f"Failed to register mode hotkey {key}: {exc}"
+            print(message)
+            append_history(args, {
+                "mode": mode,
+                "mode_label": get_mode_label(mode),
+                "status": "skipped",
+                "reason": "hotkey_registration_failed",
+                "hotkey": key,
+                "error": str(exc),
+            })
+
+    register_mode_hotkey(args.paste_hotkey, "paste")
+    register_mode_hotkey(args.thought_hotkey, "thought")
+    register_mode_hotkey(args.meeting_hotkey, "meeting")
+    register_mode_hotkey(args.translate_en_hotkey, "translate_en")
+    register_mode_hotkey(args.translate_ja_hotkey, "translate_ja")
     startup_message = (
         "待命中\n"
         f"{get_shortcuts_text(args)}\n"
@@ -1205,6 +1475,11 @@ def run_hotkey_listener(args) -> None:
     finally:
         if recorder.stream:
             recorder.stop()
+        for hotkey_id in mode_hotkey_ids:
+            try:
+                keyboard.remove_hotkey(hotkey_id)
+            except Exception:
+                pass
         remove_control_hotkeys()
         overlay.stop()
         notify("Desktop Voice Capture", "語音工具已停止。")
@@ -1242,6 +1517,18 @@ def parse_args():
     parser.add_argument("--sample-rate", type=int, default=int(cfg("sample_rate", "VOICE_SAMPLE_RATE", DEFAULT_SAMPLE_RATE)))
     parser.add_argument("--min-rms", type=float, default=float(cfg("min_rms", "VOICE_MIN_RMS", DEFAULT_MIN_RMS)))
     parser.add_argument("--min-peak", type=float, default=float(cfg("min_peak", "VOICE_MIN_PEAK", DEFAULT_MIN_PEAK)))
+    parser.add_argument(
+        "--silence-pause-seconds",
+        type=float,
+        default=float(cfg("silence_pause_seconds", "VOICE_SILENCE_PAUSE_SECONDS", DEFAULT_SILENCE_PAUSE_SECONDS)),
+        help="Auto-pause recording after this many continuous quiet seconds; set 0 to disable.",
+    )
+    parser.add_argument(
+        "--silence-keep-seconds",
+        type=float,
+        default=float(cfg("silence_keep_seconds", "VOICE_SILENCE_KEEP_SECONDS", DEFAULT_SILENCE_KEEP_SECONDS)),
+        help="Keep this much quiet padding around resumed speech.",
+    )
     parser.add_argument("--vault-path", default=cfg("vault_path", "OBSIDIAN_VAULT_PATH", DEFAULT_VAULT_PATH))
     parser.add_argument("--capture-dir", default=cfg("capture_dir", "VOICE_CAPTURE_DIR", DEFAULT_CAPTURE_DIR))
     parser.add_argument("--thought-folder", default=cfg("thought_folder", "VOICE_THOUGHT_FOLDER", r"Sources\desktop-voice"))

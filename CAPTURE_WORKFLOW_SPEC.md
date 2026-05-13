@@ -135,8 +135,16 @@ or regulations should be lightly normalized only.
   - `Ctrl+Alt+C`: meeting note saved to `Meetings/`.
   - `Ctrl+Alt+E`: translate to English and paste.
   - `Ctrl+Alt+J`: translate to Japanese and paste.
-- After choosing a mode, `Space` starts recording and `Space` stops recording and
-  outputs the result. Re-pressing the current mode hotkey can also start/stop.
+- Starting and stopping should not reserve `Space` by default because it
+  conflicts with Chinese IME candidate selection. Re-pressing the current mode
+  hotkey starts/stops recording, and the overlay should also provide manual
+  start/stop and cancel controls. `confirm_hotkey` is optional and should remain
+  `none` unless the user explicitly chooses another key such as `F8`.
+- Continuous low-volume sections should be treated as auto-pause, not stop:
+  after `silence_pause_seconds` quiet seconds, keep monitoring the microphone
+  but stop appending quiet audio to the final transcription file. When clear
+  speech resumes, continue recording with only a short quiet padding
+  (`silence_keep_seconds`) around the resumed speech.
 - Flow: record audio, transcribe with OpenAI Whisper, apply the local dictionary,
   lightly normalize, then paste or save based on mode.
 - The local dictionary is `voice_dictionary.txt`, ignored by git. Keep
@@ -155,6 +163,15 @@ or regulations should be lightly normalized only.
 - `open_desktop_voice_manager.cmd` is the double-click launcher for the manager.
 - The recording overlay should include a settings button that opens the desktop
   manager without interrupting the current recording.
+- The recording overlay should include manual Start/Stop and Cancel buttons so
+  recording can be controlled even when global hotkeys are unreliable.
+- Manual overlay controls should remember the last non-overlay foreground window
+  and restore it before paste/translation output, so clicking the overlay does
+  not lose the original text-field target.
+- Do not register ordinary single-key global controls such as `1-5`, `p/t/m`,
+  or `Esc`; they can suppress normal typing and Chinese IME input. Global
+  controls should be chord hotkeys only, with overlay buttons as the manual
+  fallback.
 - If the overlay is hidden, the next voice hotkey should reopen the overlay only;
   recording should require another explicit action after the overlay is visible.
 - For the everyday desktop flow, keep `overlay_idle_seconds` at `0` so the
@@ -167,6 +184,20 @@ or regulations should be lightly normalized only.
 - Do not override `Ctrl+Z`.
 - Future desktop work: make the manager more polished and consider a packaged
   installer if the Startup-folder launcher is not enough.
+
+## Line Bot Drive Diagnostics
+
+- The command `Drive診斷` (also `儲存測試`, `Obsidian診斷`, `/drive-test`)
+  should run in the actual Line Bot environment and verify:
+  - `GDRIVE_VAULT_FOLDER_ID` is configured.
+  - The configured Google Drive root is readable and matches the canonical
+    Obsidian vault.
+  - `Sources`, `Meetings`, `Wiki`, and `90_System` exist under that root.
+  - A small diagnostic note can be written through the same `save_to_gdrive`
+    path used by text and webpage captures.
+- If the diagnostic write succeeds but the desktop vault does not show the file
+  after Google Drive sync, the issue is local Drive for Desktop sync rather than
+  Line Bot capture.
 
 ## Weekly Review Rules
 
