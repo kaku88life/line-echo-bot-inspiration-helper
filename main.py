@@ -573,18 +573,65 @@ def build_url_capture_push_message(file_id: str | None, status: str, source_type
     )
 
 
+def get_gdrive_service_account_email() -> str:
+    try:
+        credentials_json = os.getenv("GDRIVE_CREDENTIALS_JSON")
+        if credentials_json:
+            return json.loads(credentials_json).get("client_email", "")
+        if GDRIVE_CREDENTIALS_FILE and os.path.exists(GDRIVE_CREDENTIALS_FILE):
+            with open(GDRIVE_CREDENTIALS_FILE, "r", encoding="utf-8") as fh:
+                return json.load(fh).get("client_email", "")
+    except Exception:
+        return ""
+    return ""
+
+
+def save_gdrive_diagnostic_note(service, now: datetime, user_id: str | None) -> dict:
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H%M%S")
+    month_str = now.strftime("%Y-%m")
+    sources_id = get_or_create_folder(service, "Sources", GDRIVE_VAULT_FOLDER_ID)
+    month_id = get_or_create_folder(service, month_str, sources_id)
+    filename = f"{date_str}-{time_str}-系統診斷-LineBot Drive 診斷.md"
+    content = "\n".join([
+        "---",
+        f"date: {date_str}",
+        "type: 系統診斷",
+        "category: 系統",
+        "source_type: text",
+        "capture_status: full",
+        "extractor: linebot-drive-diagnostic",
+        "needs_review: false",
+        "tags: [系統, linebot, drive, diagnostic]",
+        "---",
+        "",
+        "# LineBot Drive 診斷",
+        "",
+        "這是一筆 Line Bot production 環境的 Google Drive 寫入測試。",
+        "",
+        f"- Created at: {now.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- User id present: {bool(user_id)}",
+        "- 如果這筆 note 出現在桌面 Obsidian vault，代表 Google Drive API 寫入與桌面同步都正常。",
+    ])
+    media = MediaInMemoryUpload(content.encode("utf-8"), mimetype="text/plain")
+    metadata = {"name": filename, "parents": [month_id]}
+    return service.files().create(body=metadata, media_body=media, fields="id,name").execute()
+
+
 def run_gdrive_diagnostic(user_id: str | None = None) -> dict:
     now = datetime.now()
     result = {
         "vault_configured": bool(GDRIVE_VAULT_FOLDER_ID),
         "vault_id_trimmed": bool(GDRIVE_VAULT_FOLDER_ID_RAW and GDRIVE_VAULT_FOLDER_ID_RAW != GDRIVE_VAULT_FOLDER_ID),
         "credentials_source": "env_json" if os.getenv("GDRIVE_CREDENTIALS_JSON") else "file",
+        "service_account_email": get_gdrive_service_account_email(),
         "root_name": "",
         "root_accessible": False,
         "child_folders": {},
         "write_success": False,
         "file_name": "",
         "relative_folder": f"Sources/{now.strftime('%Y-%m')}",
+        "write_stage": "",
         "error": "",
     }
     if not GDRIVE_VAULT_FOLDER_ID:
@@ -610,30 +657,10 @@ def run_gdrive_diagnostic(user_id: str | None = None) -> dict:
             files = service.files().list(q=query, fields="files(id,name)").execute().get("files", [])
             result["child_folders"][folder_name] = bool(files)
 
-        diagnostic_text = (
-            "Line Bot Drive diagnostic write test.\n\n"
-            f"Created at: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"User id present: {bool(user_id)}\n"
-            "If this note appears on the desktop vault, Google Drive sync is working."
-        )
-        file_id = save_to_gdrive(
-            title=f"LineBot Drive 診斷 {now.strftime('%Y-%m-%d %H:%M:%S')}",
-            content_type="系統診斷",
-            category="系統",
-            content=diagnostic_text,
-            keywords=["linebot", "drive", "diagnostic"],
-            user_id=user_id,
-            source_type="text",
-            capture_status=CAPTURE_STATUS_FULL,
-            extractor="linebot-drive-diagnostic",
-            needs_review=False,
-            raw_input="Drive 診斷",
-            normalized_input="Drive 診斷",
-        )
-        result["write_success"] = bool(file_id)
-        if file_id:
-            metadata = service.files().get(fileId=file_id, fields="name").execute()
-            result["file_name"] = metadata.get("name", "")
+        result["write_stage"] = "create Sources/YYYY-MM folder and upload diagnostic note"
+        created = save_gdrive_diagnostic_note(service, now, user_id)
+        result["write_success"] = bool(created.get("id"))
+        result["file_name"] = created.get("name", "")
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {str(exc)[:180]}"
     return result
@@ -650,11 +677,14 @@ def build_gdrive_diagnostic_message(result: dict) -> str:
         f"- Vault 設定：{'已設定' if result.get('vault_configured') else '未設定'}",
         f"- Folder ID 空白修正：{'有，已自動移除' if result.get('vault_id_trimmed') else '無'}",
         f"- 憑證來源：{result.get('credentials_source') or 'unknown'}",
+        f"- Service Account：{result.get('service_account_email') or '無法讀取'}",
         f"- Drive 根資料夾：{result.get('root_name') or '無法讀取'}",
         f"- 根資料夾可讀：{'是' if result.get('root_accessible') else '否'}",
         f"- 必要資料夾：{folder_status or '無法檢查'}",
         f"- 測試寫入：{'成功' if result.get('write_success') else '失敗'}",
     ]
+    if result.get("write_stage"):
+        lines.append(f"- 寫入階段：{result['write_stage']}")
     if result.get("file_name"):
         lines.append(f"- 測試檔案：{result['file_name']}")
         lines.append(f"- 預期同步位置：{result.get('relative_folder')}")

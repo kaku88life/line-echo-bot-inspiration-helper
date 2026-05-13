@@ -615,17 +615,21 @@ class TestCaptureQuality:
             "vault_configured": True,
             "vault_id_trimmed": True,
             "credentials_source": "env_json",
+            "service_account_email": "bot@example.iam.gserviceaccount.com",
             "root_name": "ObsidianVault",
             "root_accessible": True,
             "child_folders": {"Sources": True, "Meetings": True, "Wiki": True, "90_System": True},
             "write_success": True,
             "file_name": "2026-05-13-223000-系統診斷-LineBot Drive 診斷.md",
             "relative_folder": "Sources/2026-05",
+            "write_stage": "create Sources/YYYY-MM folder and upload diagnostic note",
             "error": "",
         }
         message = main.build_gdrive_diagnostic_message(result)
         assert "測試寫入：成功" in message
         assert "Folder ID 空白修正：有" in message
+        assert "bot@example.iam.gserviceaccount.com" in message
+        assert "寫入階段" in message
         assert "ObsidianVault" in message
         assert "Sources/2026-05" in message
 
