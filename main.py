@@ -14,6 +14,8 @@ import google.generativeai as genai
 import requests
 from bs4 import BeautifulSoup
 from notion_client import Client as NotionClient
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.oauth2.credentials import Credentials as OAuthCredentials
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaInMemoryUpload
@@ -111,6 +113,9 @@ APIFY_API_KEY = os.getenv("APIFY_API_KEY")
 GDRIVE_CREDENTIALS_FILE = normalize_env_value(os.getenv("GDRIVE_CREDENTIALS_FILE")) or "gdrive_credentials.json"
 GDRIVE_VAULT_FOLDER_ID_RAW = os.getenv("GDRIVE_VAULT_FOLDER_ID")
 GDRIVE_VAULT_FOLDER_ID = normalize_env_value(GDRIVE_VAULT_FOLDER_ID_RAW)
+GDRIVE_AUTH_MODE = (normalize_env_value(os.getenv("GDRIVE_AUTH_MODE")) or "auto").lower()
+GDRIVE_OAUTH_CLIENT_JSON = normalize_env_value(os.getenv("GDRIVE_OAUTH_CLIENT_JSON"))
+GDRIVE_OAUTH_TOKEN_JSON = normalize_env_value(os.getenv("GDRIVE_OAUTH_TOKEN_JSON"))
 GOOGLE_CALENDAR_IDS = [cid.strip() for cid in os.getenv("GOOGLE_CALENDAR_ID", "primary").split(",") if cid.strip()]
 CRON_SECRET = os.getenv("CRON_SECRET")
 
@@ -620,11 +625,14 @@ def save_gdrive_diagnostic_note(service, now: datetime, user_id: str | None) -> 
 
 def run_gdrive_diagnostic(user_id: str | None = None) -> dict:
     now = datetime.now()
+    auth_mode = get_gdrive_auth_mode()
     result = {
         "vault_configured": bool(GDRIVE_VAULT_FOLDER_ID),
         "vault_id_trimmed": bool(GDRIVE_VAULT_FOLDER_ID_RAW and GDRIVE_VAULT_FOLDER_ID_RAW != GDRIVE_VAULT_FOLDER_ID),
+        "auth_mode": auth_mode,
         "credentials_source": "env_json" if os.getenv("GDRIVE_CREDENTIALS_JSON") else "file",
-        "service_account_email": get_gdrive_service_account_email(),
+        "service_account_email": get_gdrive_service_account_email() if auth_mode == "service_account" else "",
+        "drive_user_email": "",
         "root_name": "",
         "root_accessible": False,
         "child_folders": {},
@@ -639,6 +647,11 @@ def run_gdrive_diagnostic(user_id: str | None = None) -> dict:
         return result
     try:
         service = get_gdrive_service()
+        try:
+            about = service.about().get(fields="user").execute()
+            result["drive_user_email"] = (about.get("user") or {}).get("emailAddress", "")
+        except Exception:
+            pass
         root = service.files().get(
             fileId=GDRIVE_VAULT_FOLDER_ID,
             fields="name,mimeType,trashed",
@@ -676,8 +689,10 @@ def build_gdrive_diagnostic_message(result: dict) -> str:
         "Line Bot Drive 診斷結果",
         f"- Vault 設定：{'已設定' if result.get('vault_configured') else '未設定'}",
         f"- Folder ID 空白修正：{'有，已自動移除' if result.get('vault_id_trimmed') else '無'}",
+        f"- Drive Auth 模式：{result.get('auth_mode') or 'unknown'}",
         f"- 憑證來源：{result.get('credentials_source') or 'unknown'}",
-        f"- Service Account：{result.get('service_account_email') or '無法讀取'}",
+        f"- Service Account：{result.get('service_account_email') or '未使用'}",
+        f"- Drive User：{result.get('drive_user_email') or '無法讀取'}",
         f"- Drive 根資料夾：{result.get('root_name') or '無法讀取'}",
         f"- 根資料夾可讀：{'是' if result.get('root_accessible') else '否'}",
         f"- 必要資料夾：{folder_status or '無法檢查'}",
@@ -2383,19 +2398,43 @@ def parse_summary_response(response: str) -> dict:
     return result
 
 
+def get_gdrive_auth_mode() -> str:
+    if GDRIVE_AUTH_MODE in {"oauth", "service_account"}:
+        return GDRIVE_AUTH_MODE
+    if GDRIVE_OAUTH_TOKEN_JSON:
+        return "oauth"
+    return "service_account"
+
+
+def get_gdrive_oauth_credentials(scopes: list[str]):
+    if not GDRIVE_OAUTH_TOKEN_JSON:
+        raise RuntimeError("GDRIVE_OAUTH_TOKEN_JSON is not configured.")
+    token_info = json.loads(GDRIVE_OAUTH_TOKEN_JSON)
+    credentials = OAuthCredentials.from_authorized_user_info(token_info, scopes=scopes)
+    if credentials.expired and credentials.refresh_token:
+        credentials.refresh(GoogleAuthRequest())
+    return credentials
+
+
 def get_gdrive_service():
-    """Initialize Google Drive service.
-    Uses GDRIVE_CREDENTIALS_JSON env var (for Zeabur) or falls back to local file."""
+    """Initialize Google Drive service using OAuth user credentials when configured.
+
+    OAuth is preferred for a personal Google Drive vault because service accounts
+    cannot own files in a normal user Drive quota.
+    """
     import json as _json
     scopes = ['https://www.googleapis.com/auth/drive']
-    credentials_json = os.getenv("GDRIVE_CREDENTIALS_JSON")
-    if credentials_json:
-        info = _json.loads(credentials_json)
-        credentials = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    if get_gdrive_auth_mode() == "oauth":
+        credentials = get_gdrive_oauth_credentials(scopes)
     else:
-        credentials = service_account.Credentials.from_service_account_file(
-            GDRIVE_CREDENTIALS_FILE, scopes=scopes
-        )
+        credentials_json = os.getenv("GDRIVE_CREDENTIALS_JSON")
+        if credentials_json:
+            info = _json.loads(credentials_json)
+            credentials = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+        else:
+            credentials = service_account.Credentials.from_service_account_file(
+                GDRIVE_CREDENTIALS_FILE, scopes=scopes
+            )
     return build('drive', 'v3', credentials=credentials)
 
 

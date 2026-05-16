@@ -21,6 +21,8 @@ desktop-captures/
 
 # Google Service Account credentials (NEVER commit these)
 gdrive_credentials*.json
+gdrive_oauth_client*.json
+gdrive_oauth_token*.json
 *credentials*.json
 *service_account*.json
 

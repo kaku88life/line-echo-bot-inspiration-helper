@@ -610,12 +610,25 @@ class TestCaptureQuality:
         assert main.normalize_env_value("   ") is None
         assert main.normalize_env_value(None) is None
 
+    def test_get_gdrive_auth_mode_prefers_oauth_token(self):
+        original_mode = main.GDRIVE_AUTH_MODE
+        original_token = main.GDRIVE_OAUTH_TOKEN_JSON
+        main.GDRIVE_AUTH_MODE = "auto"
+        main.GDRIVE_OAUTH_TOKEN_JSON = '{"refresh_token":"token"}'
+        assert main.get_gdrive_auth_mode() == "oauth"
+        main.GDRIVE_OAUTH_TOKEN_JSON = None
+        assert main.get_gdrive_auth_mode() == "service_account"
+        main.GDRIVE_AUTH_MODE = original_mode
+        main.GDRIVE_OAUTH_TOKEN_JSON = original_token
+
     def test_build_gdrive_diagnostic_message_success(self):
         result = {
             "vault_configured": True,
             "vault_id_trimmed": True,
+            "auth_mode": "oauth",
             "credentials_source": "env_json",
             "service_account_email": "bot@example.iam.gserviceaccount.com",
+            "drive_user_email": "amy@example.com",
             "root_name": "ObsidianVault",
             "root_accessible": True,
             "child_folders": {"Sources": True, "Meetings": True, "Wiki": True, "90_System": True},
@@ -628,7 +641,9 @@ class TestCaptureQuality:
         message = main.build_gdrive_diagnostic_message(result)
         assert "測試寫入：成功" in message
         assert "Folder ID 空白修正：有" in message
+        assert "Drive Auth 模式：oauth" in message
         assert "bot@example.iam.gserviceaccount.com" in message
+        assert "amy@example.com" in message
         assert "寫入階段" in message
         assert "ObsidianVault" in message
         assert "Sources/2026-05" in message
