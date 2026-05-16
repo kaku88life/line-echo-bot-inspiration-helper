@@ -32,12 +32,16 @@ capture_status: full | partial | failed
 extractor: line-text | line-audio | line-image | jina | direct-html | apify | facebook-apify | threads-apify | google-maps-apify | youtube-transcript | youtube-oembed | ptt-html | 104-ajax | fallback
 needs_review: true | false
 tags: [tag1, tag2]
+related: []
 source: "https://example.com"
 ```
 
 The body should preserve the original input and the normalized result when the
 tool changes user-entered text. High-stakes notes such as finance certificates
 or regulations should be lightly normalized only.
+`related` may stay empty during capture; AI Agent review should later fill it
+with deliberate links such as `[[Wiki/Concepts/...]]` instead of guessing at
+ingestion time.
 
 ## URL Capture Rules
 

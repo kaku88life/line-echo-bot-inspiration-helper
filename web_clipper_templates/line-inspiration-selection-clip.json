@@ -60,6 +60,11 @@
       "name": "tags",
       "value": "web-clip, term, inbox",
       "type": "text"
+    },
+    {
+      "name": "related",
+      "value": "",
+      "type": "text"
     }
   ],
   "triggers": [],

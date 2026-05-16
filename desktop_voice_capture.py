@@ -512,6 +512,7 @@ def build_voice_note(
         "capture_status: full",
         "extractor: desktop-whisper",
         "needs_review: false",
+        "related: []",
         f"mode: {mode}",
         "---",
         "",

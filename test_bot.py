@@ -2642,6 +2642,7 @@ class TestDesktopVoiceCapture:
         assert "type: 語音筆記" in result
         assert "source_type: audio" in result
         assert "extractor: desktop-whisper" in result
+        assert "related: []" in result
         assert "## 整理後文字" in result
         assert "整理後內容" in result
         assert "原始內容" in result

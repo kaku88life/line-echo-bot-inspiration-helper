@@ -608,6 +608,7 @@ def save_gdrive_diagnostic_note(service, now: datetime, user_id: str | None) -> 
         "extractor: linebot-drive-diagnostic",
         "needs_review: false",
         "tags: [系統, linebot, drive, diagnostic]",
+        "related: []",
         "---",
         "",
         "# LineBot Drive 診斷",
@@ -2800,6 +2801,7 @@ def save_to_gdrive(
             frontmatter += f"extractor: {extractor}\n"
         frontmatter += f"needs_review: {yaml_bool(needs_review)}\n"
         frontmatter += f"tags: [{', '.join(tags)}]\n"
+        frontmatter += "related: []\n"
         if source_url:
             frontmatter += f"source: \"{source_url}\"\n"
         if target_language:
